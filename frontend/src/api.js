@@ -31,3 +31,5 @@ api.interceptors.response.use(
 )
 
 export default api
+// Trigger Vercel rebuild with new VITE_API_BASE_URL environment variable
+

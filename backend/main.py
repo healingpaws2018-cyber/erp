@@ -224,7 +224,8 @@ app.add_middleware(
         "http://localhost:3000", 
         "http://localhost:8000", 
         "https://pet-erp-six.vercel.app",
-        "https://pet-erp-git-main-kuzhalone.vercel.app"
+        "https://pet-erp-git-main-kuzhalone.vercel.app",
+        "https://erp-ten-bice.vercel.app"
     ],
     allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,

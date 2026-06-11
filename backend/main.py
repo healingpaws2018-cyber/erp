@@ -227,7 +227,7 @@ app.add_middleware(
         "https://pet-erp-git-main-kuzhalone.vercel.app",
         "https://erp-ten-bice.vercel.app"
     ],
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    # allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

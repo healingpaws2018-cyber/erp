@@ -38,7 +38,7 @@ export default function ClinicSetup() {
       setConfirmText('')
       setIsModalOpen(false)
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Database clear failed')
+      toast.error(getErrMsg(err, 'Database clear failed'))
     } finally {
       setClearing(false)
     }
@@ -66,21 +66,38 @@ export default function ClinicSetup() {
     if (!form.clinic_name) { toast.error('Clinic Name is required'); return }
     setLoading(true)
     try {
+      // Coerce city_id: empty string → null, digit string → integer
+      const payload = {
+        ...form,
+        city_id: form.city_id === '' || form.city_id === null || form.city_id === undefined
+          ? null
+          : Number(form.city_id)
+      }
       if (exists) {
-        await api.put('/clinic/setup', form)
+        await api.put('/clinic/setup', payload)
       } else {
-        await api.post('/clinic/setup', form)
+        await api.post('/clinic/setup', payload)
         setExists(true)
       }
       toast.success('Clinic profile saved!')
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Save failed')
+      toast.error(getErrMsg(err, 'Save failed'))
     } finally {
       setLoading(false)
     }
   }
 
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }))
+
+  // Safely extract a string message from a FastAPI error response
+  // (422 errors return detail as an array of validation error objects)
+  const getErrMsg = (err, fallback = 'Save failed') => {
+    const detail = err.response?.data?.detail
+    if (!detail) return fallback
+    if (typeof detail === 'string') return detail
+    if (Array.isArray(detail)) return detail.map(d => d.msg || JSON.stringify(d)).join('; ')
+    return fallback
+  }
 
   if (fetching) return (
     <div className="card flex items-center justify-center py-12">

@@ -211,7 +211,8 @@ except Exception as e:
 try:
     with engine.connect() as conn:
         clinic_columns = [
-            ("city_name", "VARCHAR(100)"),
+            ("city_name",  "VARCHAR(100)"),
+            ("logo_path",  "VARCHAR(500)"),
         ]
         for col_name, col_type in clinic_columns:
             try:

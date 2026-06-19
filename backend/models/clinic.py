@@ -34,6 +34,7 @@ class ClinicSetup(Base):
     pan             = Column(String(12), nullable=True)
     reg_number      = Column(String(100), nullable=True)
     drug_license_no = Column(String(50))
+    logo_path       = Column(String(500), nullable=True)  # path/url to uploaded logo
     established_on  = Column(Date, nullable=True)
 
     # Financial Year

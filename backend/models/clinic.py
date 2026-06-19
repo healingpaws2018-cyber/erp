@@ -16,6 +16,7 @@ class ClinicSetup(Base):
     address3        = Column(Text)
     city            = Column(String(100), nullable=True) # legacy
     city_id         = Column(Integer, ForeignKey("cities.city_id"), nullable=True)
+    city_name       = Column(String(100), nullable=True)  # display label from city dropdown
     district        = Column(String(100))
     state           = Column(String(100), nullable=True) # legacy
     state_name      = Column(String(100))

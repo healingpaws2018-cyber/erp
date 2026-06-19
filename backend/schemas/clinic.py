@@ -12,6 +12,7 @@ class ClinicSetupBase(BaseModel):
     address3:       Optional[str] = None
     city:           Optional[str] = None # legacy
     city_id:        Optional[int] = None
+    city_name:      Optional[str] = None
     district:       Optional[str] = None
     state:          Optional[str] = None # legacy
     state_name:     Optional[str] = None

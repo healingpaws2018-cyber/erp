@@ -207,6 +207,22 @@ try:
 except Exception as e:
     print(f"⚠️ Master DB column migration check: {e}")
 
+# ─── Auto-Migrate clinic_setup table columns if missing ─────────────────────
+try:
+    with engine.connect() as conn:
+        clinic_columns = [
+            ("city_name", "VARCHAR(100)"),
+        ]
+        for col_name, col_type in clinic_columns:
+            try:
+                conn.execute(text(f"ALTER TABLE clinic_setup ADD COLUMN IF NOT EXISTS {col_name} {col_type}"))
+                conn.commit()
+                print(f"➕ Added missing column '{col_name}' to clinic_setup.")
+            except Exception:
+                conn.rollback()
+except Exception as e:
+    print(f"⚠️ clinic_setup column migration check: {e}")
+
 # ─── FastAPI App ─────────────────────────────────────────────────────────────
 app = FastAPI(
     title="🐾 Pet Clinic ERP",

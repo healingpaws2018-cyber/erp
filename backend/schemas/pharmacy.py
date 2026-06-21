@@ -84,6 +84,7 @@ class MedicineOut(MedicineBase):
 class BatchCreate(BaseModel):
     medicine_id: int
     batch_no: str
+    mfg_date: Optional[date] = None
     expiry_date: date
     purchase_price: Decimal = Decimal("0")
     sale_price: Decimal = Decimal("0")

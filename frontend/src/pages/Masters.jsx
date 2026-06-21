@@ -526,6 +526,83 @@ function VaccineMasterTab() {
 }
 
 
+// ─── ADD HSN QUICK MODAL (used inside MedicineMasterTab) ─────
+function AddHsnQuickModal({ isOpen, onClose, onCreated }) {
+  const [form, setForm] = useState({ hsn_code: '', description: '', default_gst_pct: '12' })
+  const [saving, setSaving] = useState(false)
+
+  const reset = () => setForm({ hsn_code: '', description: '', default_gst_pct: '12' })
+
+  const handleSave = async (e) => {
+    e.preventDefault()
+    if (!form.hsn_code || !form.description) return toast.error('HSN code and description are required')
+    setSaving(true)
+    try {
+      const res = await api.post('/masters/hsn', {
+        ...form,
+        default_gst_pct: parseFloat(form.default_gst_pct) || 12
+      })
+      toast.success(`HSN ${res.data.hsn_code} added!`)
+      onCreated(res.data)
+      reset()
+      onClose()
+    } catch (err) { toast.error(err.response?.data?.detail || 'Error saving HSN') }
+    finally { setSaving(false) }
+  }
+
+  if (!isOpen) return null
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" style={{ background: 'rgba(15,23,42,0.6)' }}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 bg-indigo-50">
+          <div>
+            <h2 className="font-semibold text-slate-800 text-sm">Quick Add HSN Code</h2>
+            <p className="text-xs text-slate-500 mt-0.5">Add a new HSN code without leaving this form</p>
+          </div>
+          <button onClick={() => { reset(); onClose() }} className="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+        </div>
+        <form onSubmit={handleSave} className="px-5 py-4 space-y-3">
+          <div>
+            <label className="label">HSN Code *</label>
+            <input
+              className="input-field"
+              value={form.hsn_code}
+              onChange={e => setForm(f => ({ ...f, hsn_code: e.target.value }))}
+              placeholder="e.g. 3004"
+              autoFocus
+              maxLength={10}
+            />
+          </div>
+          <div>
+            <label className="label">Description *</label>
+            <input
+              className="input-field"
+              value={form.description}
+              onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
+              placeholder="Medicaments for veterinary use"
+            />
+          </div>
+          <div>
+            <label className="label">Default GST %</label>
+            <input
+              className="input-field"
+              type="number"
+              step="0.01"
+              min="0"
+              value={form.default_gst_pct}
+              onChange={e => setForm(f => ({ ...f, default_gst_pct: e.target.value }))}
+            />
+          </div>
+          <div className="flex gap-2 justify-end pt-2 border-t border-slate-100">
+            <button type="button" onClick={() => { reset(); onClose() }} className="btn-secondary text-sm">Cancel</button>
+            <button type="submit" disabled={saving} className="btn-primary text-sm">{saving ? 'Adding...' : 'Add HSN'}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
 // ─── MEDICINE MASTER TAB ─────────────────────────────────────
 function MedicineMasterTab() {
   const [data, setData]       = useState([])
@@ -536,6 +613,24 @@ function MedicineMasterTab() {
   const [modal, setModal]     = useState(false)
   const [editing, setEditing] = useState(null)
   const [saving, setSaving]   = useState(false)
+  const [hsnQuickModal, setHsnQuickModal] = useState(false)
+
+  // Batch state
+  const [batches, setBatches]         = useState([])
+  const [batchSaving, setBatchSaving] = useState(false)
+  const [showBatchForm, setShowBatchForm] = useState(false)
+  const blankBatch = { batch_no: '', mfg_date: '', expiry_date: '', purchase_price: '', sale_price: '', mrp: '', opening_qty: '0' }
+  const [batchForm, setBatchForm]     = useState(blankBatch)
+
+  // Opening stock quick-add state
+  const [stockQty, setStockQty]             = useState('')
+  const [stockPurchasePrice, setStockPurchasePrice] = useState('')
+  const [stockSalePrice, setStockSalePrice] = useState('')
+  const [stockMrp, setStockMrp]             = useState('')
+  const [stockSaving, setStockSaving]       = useState(false)
+  const [showStockForm, setShowStockForm]   = useState(false)
+  const [currentStock, setCurrentStock]     = useState(0)
+
   const blank = { medicine_name: '', medicine_name2: '', hsn_id: '', gst_rate_id: '', unit_id: '', reorder_level: 0, is_active: true }
   const [form, setForm] = useState(blank)
 
@@ -543,16 +638,38 @@ function MedicineMasterTab() {
     api.get('/inventory/medicines', { params: { search, include_inactive: true } })
       .then(r => setData(r.data)).catch(() => {})
 
+  const loadHsn = () => api.get('/masters/hsn').then(r => setHsn(r.data)).catch(() => {})
+
+  const loadBatches = (medicineId) =>
+    api.get(`/inventory/batches/${medicineId}`)
+      .then(r => setBatches(r.data))
+      .catch(() => setBatches([]))
+
   useEffect(() => { load() }, [search])
   useEffect(() => {
     api.get('/inventory/units').then(r => setUnits(r.data)).catch(() => {})
-    api.get('/masters/hsn').then(r => setHsn(r.data)).catch(() => {})
+    loadHsn()
     api.get('/masters/gst-rates').then(r => setGst(r.data)).catch(() => {})
   }, [])
 
-  const openAdd  = () => { setEditing(null); setForm(blank); setModal(true) }
+  const openAdd  = () => {
+    setEditing(null)
+    setForm(blank)
+    setBatches([])
+    setBatchForm(blankBatch)
+    setShowBatchForm(false)
+    setCurrentStock(0)
+    setShowStockForm(false)
+    setStockQty('')
+    setStockPurchasePrice('')
+    setStockSalePrice('')
+    setStockMrp('')
+    setModal(true)
+  }
+
   const openEdit = row => {
     setEditing(row)
+    setCurrentStock(Number(row.current_stock) || 0)
     setForm({
       medicine_name:  row.medicine_name,
       medicine_name2: row.medicine_name2 || '',
@@ -562,6 +679,14 @@ function MedicineMasterTab() {
       reorder_level:  row.reorder_level  ?? 0,
       is_active:      row.is_active,
     })
+    setBatchForm(blankBatch)
+    setShowBatchForm(false)
+    setShowStockForm(false)
+    setStockQty('')
+    setStockPurchasePrice('')
+    setStockSalePrice('')
+    setStockMrp('')
+    loadBatches(row.medicine_id)
     setModal(true)
   }
 
@@ -577,14 +702,94 @@ function MedicineMasterTab() {
         unit_id: form.unit_id ? Number(form.unit_id) : null,
         reorder_level: Number(form.reorder_level) || 0
       }
-      if (editing) await api.put(`/inventory/medicines/${editing.medicine_id}`, payload)
-      else         await api.post('/inventory/medicines', payload)
-      toast.success('Saved!'); setModal(false); load()
+      if (editing) {
+        await api.put(`/inventory/medicines/${editing.medicine_id}`, payload)
+        toast.success('Medicine updated!')
+      } else {
+        const res = await api.post('/inventory/medicines', payload)
+        toast.success('Medicine added! You can now add opening stock and batches.')
+        const created = res.data
+        setEditing(created)
+        setCurrentStock(0)
+        loadBatches(created.medicine_id)
+        load()
+        return  // keep modal open for stock/batch entry
+      }
+      setModal(false); load()
     } catch (err) { toast.error(err.response?.data?.detail || 'Error') }
     finally { setSaving(false) }
   }
 
+  // Quick opening stock — auto-generates batch_no & expiry, posts to /inventory/batches
+  const handleQuickStock = async e => {
+    e.preventDefault()
+    e.stopPropagation()
+    const qty = parseFloat(stockQty)
+    if (!qty || qty <= 0) return toast.error('Please enter a valid quantity greater than 0')
+    setStockSaving(true)
+    try {
+      const now = new Date()
+      // Use timestamp to ensure unique batch_no on every call
+      const autoBatchNo = `OPG-${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${now.getTime().toString().slice(-5)}`
+      const autoExpiry  = `${now.getFullYear() + 5}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+      await api.post('/inventory/batches', {
+        medicine_id:    editing.medicine_id,
+        batch_no:       autoBatchNo,
+        expiry_date:    autoExpiry,
+        purchase_price: parseFloat(stockPurchasePrice) || 0,
+        sale_price:     parseFloat(stockSalePrice)     || 0,
+        mrp:            parseFloat(stockMrp)           || 0,
+        opening_qty:    qty,
+        source:         'Opening'
+      })
+      // Optimistic update — directly add qty; no fragile search-and-find
+      setCurrentStock(prev => prev + qty)
+      toast.success(`✓ ${qty} units added to stock!`)
+      setStockQty('')
+      setStockPurchasePrice('')
+      setStockSalePrice('')
+      setStockMrp('')
+      setShowStockForm(false)
+      loadBatches(editing.medicine_id)
+      load() // refresh table in background
+    } catch (err) { toast.error(err.response?.data?.detail || 'Error adding stock') }
+    finally { setStockSaving(false) }
+  }
+
+  const handleAddBatch = async e => {
+    e.preventDefault()
+    if (!batchForm.batch_no) return toast.error('Batch number is required')
+    if (!batchForm.expiry_date) return toast.error('Expiry date is required')
+    setBatchSaving(true)
+    try {
+      await api.post('/inventory/batches', {
+        medicine_id:    editing.medicine_id,
+        batch_no:       batchForm.batch_no,
+        mfg_date:       batchForm.mfg_date || null,
+        expiry_date:    batchForm.expiry_date,
+        purchase_price: parseFloat(batchForm.purchase_price) || 0,
+        sale_price:     parseFloat(batchForm.sale_price)     || 0,
+        mrp:            parseFloat(batchForm.mrp)            || 0,
+        opening_qty:    parseFloat(batchForm.opening_qty)    || 0,
+        source:         'Opening'
+      })
+      toast.success(`Batch ${batchForm.batch_no} added!`)
+      setBatchForm(blankBatch)
+      setShowBatchForm(false)
+      loadBatches(editing.medicine_id)
+      load() // refresh stock
+    } catch (err) { toast.error(err.response?.data?.detail || 'Error adding batch') }
+    finally { setBatchSaving(false) }
+  }
+
+  // Called when a new HSN is created via the quick modal
+  const handleHsnCreated = (newHsn) => {
+    setHsn(prev => [...prev, newHsn].sort((a, b) => a.hsn_code.localeCompare(b.hsn_code)))
+    setForm(f => ({ ...f, hsn_id: String(newHsn.hsn_id) }))
+  }
+
   const set = k => e => setForm(f => ({ ...f, [k]: k === 'is_active' ? e.target.checked : e.target.value }))
+  const setBF = k => e => setBatchForm(f => ({ ...f, [k]: e.target.value }))
 
   return (
     <>
@@ -601,7 +806,7 @@ function MedicineMasterTab() {
           { key: 'medicine_name',  label: 'Trade Name' },
           { key: 'medicine_name2', label: 'Generic Name' },
           { key: 'current_stock',  label: 'Stock', render: (v, row) => (
-            <span className={`font-semibold ${v <= (row.reorder_level || 0) ? 'text-red-500' : 'text-emerald-600'}`}>{v}</span>
+            <span className={`font-semibold ${Number(v) <= Number(row.reorder_level || 0) ? 'text-red-500' : 'text-emerald-600'}`}>{v}</span>
           )},
           { key: 'is_active', label: 'Status', render: v => (
             <span className={`px-2 py-0.5 text-xs rounded-full font-medium ${v ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-600'}`}>
@@ -618,53 +823,305 @@ function MedicineMasterTab() {
         )}
         emptyText="No medicines found. Click 'Add Medicine' to create the first item."
       />
-      <FormModal isOpen={modal} onClose={() => setModal(false)} title={editing ? 'Edit Medicine' : 'Add Medicine Master'}>
-        <form onSubmit={handleSave} className="space-y-4">
-          <div>
-            <label className="label">Medicine / Trade Name *</label>
-            <input className="input-field" value={form.medicine_name} onChange={set('medicine_name')} placeholder="Amoxyclav 500mg" autoFocus />
-          </div>
-          <div>
-            <label className="label">Generic / Alternate Name</label>
-            <input className="input-field" value={form.medicine_name2} onChange={set('medicine_name2')} placeholder="Amoxicillin + Clavulanate" />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="label">Unit of Measure</label>
-              <select className="input-field" value={form.unit_id} onChange={set('unit_id')}>
-                <option value="">Select Unit</option>
-                {units.map(u => <option key={u.unit_id} value={u.unit_id}>{u.unit_name}</option>)}
-              </select>
+
+      {/* Main Medicine Modal — wide to accommodate batch panel */}
+      {modal && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-y-auto" style={{ background: 'rgba(15,23,42,0.45)' }}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl my-6 animate-in zoom-in-95 duration-200">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+              <div>
+                <h2 className="font-semibold text-slate-800">{editing ? 'Edit Medicine' : 'Add Medicine Master'}</h2>
+                {editing && <p className="text-xs text-slate-400 mt-0.5">Code: {editing.medicine_code}</p>}
+              </div>
+              <button onClick={() => setModal(false)} className="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
             </div>
-            <div>
-              <label className="label">Reorder Level</label>
-              <input className="input-field" type="number" value={form.reorder_level} onChange={set('reorder_level')} placeholder="10" />
-            </div>
-            <div>
-              <label className="label">HSN Code</label>
-              <select className="input-field" value={form.hsn_id} onChange={set('hsn_id')}>
-                <option value="">Select HSN</option>
-                {hsnCodes.map(h => <option key={h.hsn_id} value={h.hsn_id}>{h.hsn_code} – {h.description}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="label">GST Rate</label>
-              <select className="input-field" value={form.gst_rate_id} onChange={set('gst_rate_id')}>
-                <option value="">Select Rate</option>
-                {gstRates.map(g => <option key={g.gst_rate_id} value={g.gst_rate_id}>{g.rate_name} ({g.gst_percent}%)</option>)}
-              </select>
+
+            <div className="p-6 space-y-6">
+              {/* ── MEDICINE DETAILS FORM ── */}
+              <form onSubmit={handleSave} className="space-y-4" id="med-form">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="col-span-2">
+                    <label className="label">Medicine / Trade Name *</label>
+                    <input className="input-field" value={form.medicine_name} onChange={set('medicine_name')} placeholder="Amoxyclav 500mg" autoFocus />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="label">Generic / Alternate Name</label>
+                    <input className="input-field" value={form.medicine_name2} onChange={set('medicine_name2')} placeholder="Amoxicillin + Clavulanate" />
+                  </div>
+                  <div>
+                    <label className="label">Unit of Measure</label>
+                    <select className="input-field" value={form.unit_id} onChange={set('unit_id')}>
+                      <option value="">Select Unit</option>
+                      {units.map(u => <option key={u.unit_id} value={u.unit_id}>{u.unit_name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="label">Reorder Level</label>
+                    <input className="input-field" type="number" value={form.reorder_level} onChange={set('reorder_level')} placeholder="10" />
+                  </div>
+                  <div>
+                    <label className="label">HSN Code</label>
+                    <div className="flex gap-1.5 items-center">
+                      <select className="input-field flex-1" value={form.hsn_id} onChange={set('hsn_id')}>
+                        <option value="">Select HSN</option>
+                        {hsnCodes.map(h => <option key={h.hsn_id} value={h.hsn_id}>{h.hsn_code} – {h.description}</option>)}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => setHsnQuickModal(true)}
+                        title="Add new HSN code"
+                        className="shrink-0 flex items-center gap-1 px-2.5 py-2 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 text-xs font-semibold transition-colors"
+                      >
+                        <Plus size={13} /> HSN
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="label">GST Rate</label>
+                    <select className="input-field" value={form.gst_rate_id} onChange={set('gst_rate_id')}>
+                      <option value="">Select Rate</option>
+                      {gstRates.map(g => <option key={g.gst_rate_id} value={g.gst_rate_id}>{g.rate_name} ({g.gst_percent}%)</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+                    <input type="checkbox" checked={form.is_active} onChange={set('is_active')} className="w-4 h-4" />
+                    Item is Active
+                  </label>
+                  <div className="flex gap-3">
+                    <button type="button" onClick={() => setModal(false)} className="btn-secondary">Cancel</button>
+                    <button type="submit" disabled={saving} className="btn-primary">{saving ? 'Saving...' : editing ? 'Update Medicine' : 'Save & Add Batches'}</button>
+                  </div>
+                </div>
+              </form>
+
+              {/* ── OPENING STOCK WIDGET (only shown when editing an existing medicine) ── */}
+              {editing && (
+                <div className="border-t border-slate-100 pt-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                        <span className="inline-block w-2 h-2 rounded-full bg-emerald-500"></span>
+                        Opening Stock
+                      </h3>
+                      <p className="text-xs text-slate-400 mt-0.5">Add current stock on hand. This updates Inventory &amp; Stock Ledger instantly.</p>
+                    </div>
+                    {/* Live stock counter */}
+                    <div className={`text-center px-5 py-2 rounded-xl border-2 ${
+                      currentStock <= 0
+                        ? 'border-red-200 bg-red-50'
+                        : currentStock <= Number(form.reorder_level || 0)
+                          ? 'border-amber-200 bg-amber-50'
+                          : 'border-emerald-200 bg-emerald-50'
+                    }`}>
+                      <div className={`text-2xl font-extrabold leading-none ${
+                        currentStock <= 0 ? 'text-red-600'
+                        : currentStock <= Number(form.reorder_level || 0) ? 'text-amber-600'
+                        : 'text-emerald-600'
+                      }`}>{currentStock}</div>
+                      <div className="text-[10px] text-slate-500 font-medium mt-0.5 uppercase tracking-wide">In Stock</div>
+                    </div>
+                  </div>
+
+                  {!showStockForm ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowStockForm(true)}
+                      className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border-2 border-dashed border-emerald-300 text-emerald-700 text-sm font-semibold hover:bg-emerald-50 transition-colors"
+                    >
+                      <Plus size={16} /> Add Opening Stock
+                    </button>
+                  ) : (
+                    <form onSubmit={handleQuickStock} className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-xs font-bold text-emerald-800 uppercase tracking-wide">Add Stock Entry</h4>
+                        <button type="button" onClick={() => { setShowStockForm(false); setStockQty('') }} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+                      </div>
+                      <div className="grid grid-cols-4 gap-3">
+                        <div className="col-span-2">
+                          <label className="label text-emerald-800">Quantity to Add *</label>
+                          <input
+                            className="input-field text-lg font-bold"
+                            type="number"
+                            step="0.01"
+                            min="0.01"
+                            value={stockQty}
+                            onChange={e => setStockQty(e.target.value)}
+                            placeholder="e.g. 100"
+                            autoFocus
+                          />
+                        </div>
+                        <div>
+                          <label className="label text-emerald-800">Purchase Price</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={stockPurchasePrice} onChange={e => setStockPurchasePrice(e.target.value)} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="label text-emerald-800">MRP</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={stockMrp} onChange={e => setStockMrp(e.target.value)} placeholder="0.00" />
+                        </div>
+                        <div className="col-span-2">
+                          <label className="label text-emerald-800">Sale Price</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={stockSalePrice} onChange={e => setStockSalePrice(e.target.value)} placeholder="0.00" />
+                        </div>
+                        <div className="col-span-2">
+                          <label className="label text-slate-400">Note</label>
+                          <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                            Batch No auto-set to <span className="font-mono text-slate-600">OPG-{new Date().getFullYear()}{String(new Date().getMonth()+1).padStart(2,'0')}-{editing?.medicine_id}</span>. Expiry defaults to 5 years.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 justify-end pt-1 border-t border-emerald-200">
+                        <button type="button" onClick={() => { setShowStockForm(false); setStockQty('') }} className="btn-secondary text-xs">Cancel</button>
+                        <button
+                          type="submit"
+                          disabled={stockSaving || !stockQty}
+                          className="flex items-center gap-2 px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold disabled:opacity-60 transition-colors"
+                        >
+                          {stockSaving ? 'Adding...' : `Add ${stockQty || 0} Units to Stock`}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </div>
+              )}
+
+              {/* ── BATCH PANEL (only shown when editing an existing medicine) ── */}
+              {editing && (
+                <div className="border-t border-slate-100 pt-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                        <span className="inline-block w-2 h-2 rounded-full bg-indigo-500"></span>
+                        Batch Numbers
+                        <span className="text-slate-400 font-normal">({batches.length} batch{batches.length !== 1 ? 'es' : ''})</span>
+                      </h3>
+                      <p className="text-xs text-slate-400 mt-0.5">Opening stock batches for this medicine. Purchase batches are added via Purchase Bills.</p>
+                    </div>
+                    {!showBatchForm && (
+                      <button
+                        type="button"
+                        onClick={() => setShowBatchForm(true)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
+                      >
+                        <Plus size={13} /> Add Batch
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Existing batches table */}
+                  {batches.length > 0 && (
+                    <div className="rounded-xl border border-slate-100 overflow-hidden mb-4">
+                      <table className="w-full text-xs">
+                        <thead className="bg-slate-50">
+                          <tr>
+                            <th className="text-left py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Batch No</th>
+                            <th className="text-left py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Mfg Date</th>
+                            <th className="text-left py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Expiry</th>
+                            <th className="text-right py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Pur. Price</th>
+                            <th className="text-right py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Sale Price</th>
+                            <th className="text-right py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">MRP</th>
+                            <th className="text-right py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Qty</th>
+                            <th className="text-left py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Source</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50">
+                          {batches.map(b => {
+                            const isExpired = b.expiry_date && new Date(b.expiry_date) < new Date()
+                            const isNearExpiry = b.expiry_date && !isExpired && (new Date(b.expiry_date) - new Date()) < 90*24*60*60*1000
+                            return (
+                              <tr key={b.batch_id} className="hover:bg-slate-50">
+                                <td className="py-2 px-3 font-semibold text-indigo-700">{b.batch_no}</td>
+                                <td className="py-2 px-3 text-slate-500">{b.mfg_date || '—'}</td>
+                                <td className="py-2 px-3">
+                                  <span className={`font-medium ${
+                                    isExpired ? 'text-red-600' : isNearExpiry ? 'text-amber-600' : 'text-slate-600'
+                                  }`}>{b.expiry_date}</span>
+                                  {isExpired && <span className="ml-1 px-1 bg-red-100 text-red-600 rounded text-[10px]">Expired</span>}
+                                  {isNearExpiry && !isExpired && <span className="ml-1 px-1 bg-amber-100 text-amber-600 rounded text-[10px]">Near</span>}
+                                </td>
+                                <td className="py-2 px-3 text-right text-slate-600">{Number(b.purchase_price).toFixed(2)}</td>
+                                <td className="py-2 px-3 text-right text-slate-600">{Number(b.sale_price).toFixed(2)}</td>
+                                <td className="py-2 px-3 text-right font-semibold text-slate-700">{Number(b.mrp).toFixed(2)}</td>
+                                <td className="py-2 px-3 text-right">
+                                  <span className={`font-bold ${Number(b.current_qty) <= 0 ? 'text-red-500' : 'text-emerald-600'}`}>
+                                    {Number(b.current_qty)}
+                                  </span>
+                                </td>
+                                <td className="py-2 px-3">
+                                  <span className="px-1.5 py-0.5 bg-slate-100 text-slate-500 rounded text-[10px]">{b.source}</span>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {batches.length === 0 && !showBatchForm && (
+                    <div className="text-center py-6 text-slate-400 text-sm border border-dashed border-slate-200 rounded-xl">
+                      No batches yet. Click "Add Batch" to add opening stock.
+                    </div>
+                  )}
+
+                  {/* Inline Add Batch Form */}
+                  {showBatchForm && (
+                    <form onSubmit={handleAddBatch} className="bg-indigo-50 border border-indigo-100 rounded-xl p-4 space-y-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <h4 className="text-xs font-bold text-indigo-700 uppercase tracking-wide">New Batch Entry</h4>
+                        <button type="button" onClick={() => { setShowBatchForm(false); setBatchForm(blankBatch) }} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="col-span-1">
+                          <label className="label text-indigo-700">Batch No *</label>
+                          <input className="input-field" value={batchForm.batch_no} onChange={setBF('batch_no')} placeholder="e.g. BT2024001" autoFocus />
+                        </div>
+                        <div>
+                          <label className="label text-indigo-700">Mfg Date</label>
+                          <input className="input-field" type="date" value={batchForm.mfg_date} onChange={setBF('mfg_date')} />
+                        </div>
+                        <div>
+                          <label className="label text-indigo-700">Expiry Date *</label>
+                          <input className="input-field" type="date" value={batchForm.expiry_date} onChange={setBF('expiry_date')} />
+                        </div>
+                        <div>
+                          <label className="label text-indigo-700">Purchase Price</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={batchForm.purchase_price} onChange={setBF('purchase_price')} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="label text-indigo-700">Sale Price</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={batchForm.sale_price} onChange={setBF('sale_price')} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="label text-indigo-700">MRP</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={batchForm.mrp} onChange={setBF('mrp')} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="label text-indigo-700">Opening Qty</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={batchForm.opening_qty} onChange={setBF('opening_qty')} placeholder="0" />
+                        </div>
+                      </div>
+                      <div className="flex gap-2 justify-end pt-1">
+                        <button type="button" onClick={() => { setShowBatchForm(false); setBatchForm(blankBatch) }} className="btn-secondary text-xs">Cancel</button>
+                        <button type="submit" disabled={batchSaving} className="btn-primary text-xs">{batchSaving ? 'Adding...' : 'Add Batch'}</button>
+                      </div>
+                    </form>
+                  )}
+                </div>
+              )}
             </div>
           </div>
-          <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
-            <input type="checkbox" checked={form.is_active} onChange={set('is_active')} className="w-4 h-4" />
-            Item is Active
-          </label>
-          <div className="flex gap-3 justify-end pt-2 border-t border-slate-100">
-            <button type="button" onClick={() => setModal(false)} className="btn-secondary">Cancel</button>
-            <button type="submit" disabled={saving} className="btn-primary">{saving ? 'Saving...' : 'Save'}</button>
-          </div>
-        </form>
-      </FormModal>
+        </div>
+      )}
+
+      {/* HSN Quick-Add Sub-Modal (z-[60] sits above main modal z-50) */}
+      <AddHsnQuickModal
+        isOpen={hsnQuickModal}
+        onClose={() => setHsnQuickModal(false)}
+        onCreated={handleHsnCreated}
+      />
     </>
   )
 }

@@ -165,12 +165,12 @@ export default function Inventory() {
             { key: 'medicine_code', label: 'Code', width: 100 },
             { key: 'medicine_name', label: 'Medicine' },
             { key: 'dosage_form',   label: 'Form', width: 100 },
-            { key: 'current_stock', label: 'Total Stock', render: v => (
-              <span className={`font-bold ${v <= 10 ? 'text-red-500' : 'text-slate-700'}`}>{v}</span>
+            { key: 'current_stock', label: 'Total Stock', render: (v, row) => (
+              <span className={`font-bold ${Number(v) <= Number(row.reorder_level) ? 'text-red-500' : 'text-emerald-600'}`}>{v}</span>
             )},
             { key: 'reorder_level', label: 'Reorder Level', width: 120 },
             { key: 'medicine_id',   label: 'Status', render: (v, row) => (
-              row.current_stock <= row.reorder_level 
+              Number(row.current_stock) <= Number(row.reorder_level)
                 ? <span className="badge bg-red-100 text-red-700 flex items-center gap-1 w-fit"><AlertTriangle size={12}/> Low Stock</span>
                 : <span className="badge bg-green-100 text-green-700 w-fit">Good</span>
             )},

@@ -24,15 +24,15 @@ export default function Medicines() {
   }
   const [formData, setFormData] = useState(blankForm)
 
-  // Live stock counter — computed from sum of all batch current_qty
-  const currentStock = batches.reduce((sum, b) => sum + Number(b.current_qty || 0), 0)
-
   // Batch state
   const [batches, setBatches]           = useState([])
   const [showBatchForm, setShowBatchForm] = useState(false)
   const [batchSaving, setBatchSaving]   = useState(false)
   const blankBatch = { batch_no: '', mfg_date: '', expiry_date: '', purchase_price: '', sale_price: '', mrp: '', opening_qty: '0' }
   const [batchForm, setBatchForm]       = useState(blankBatch)
+
+  // Live stock counter — computed from sum of all batch current_qty
+  const currentStock = batches.reduce((sum, b) => sum + Number(b.current_qty || 0), 0)
 
   // Edit batch state
   const [editingBatch, setEditingBatch] = useState(null)

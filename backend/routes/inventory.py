@@ -8,7 +8,7 @@ from models.phase3 import Supplier
 from schemas.pharmacy import (
     SupplierCreate, SupplierOut,
     MedicineCreate, MedicineOut,
-    BatchCreate, BatchOut,
+    BatchCreate, BatchUpdate, BatchOut,
     UnitCreate, UnitOut, StockLedgerOut
 )
 from utils.doc_sequence import get_next_doc_no
@@ -118,10 +118,16 @@ def create_medicine(data: MedicineCreate, db: Session = Depends(get_db)):
 
 @router.put("/medicines/{medicine_id}", response_model=MedicineOut)
 def update_medicine(medicine_id: int, data: MedicineCreate, db: Session = Depends(get_db)):
-    m = db.query(Medicine).filter(Medicine.medicine_id == medicine_id).first()
+    from sqlalchemy.orm import joinedload
+    m = db.query(Medicine).options(joinedload(Medicine.gst_rate)).filter(Medicine.medicine_id == medicine_id).first()
     if not m: raise HTTPException(404, "Medicine not found")
-    for k, v in data.model_dump().items(): setattr(m, k, v)
+    # Exclude medicine_code from updates to avoid overwriting the auto-generated code
+    update_fields = {k: v for k, v in data.model_dump().items() if k != 'medicine_code'}
+    for k, v in update_fields.items():
+        setattr(m, k, v)
     db.commit(); db.refresh(m)
+    # Set gst_pct virtual field (same as list endpoint) to satisfy MedicineOut schema
+    m.gst_pct = m.gst_rate.gst_percent if m.gst_rate else None
     return m
 
 # ── BATCHES & STOCK ──────────────────────────────────────────
@@ -153,9 +159,88 @@ def create_opening_batch(data: BatchCreate, db: Session = Depends(get_db)):
     db.commit(); db.refresh(b)
     return b
 
+@router.put("/batches/{batch_id}", response_model=BatchOut)
+def update_batch(batch_id: int, data: BatchUpdate, db: Session = Depends(get_db)):
+    """Edit a batch — adjusts stock ledger if opening_qty changes"""
+    b = db.query(MedicineBatch).filter(MedicineBatch.batch_id == batch_id).first()
+    if not b:
+        raise HTTPException(404, "Batch not found")
+
+    # If opening_qty is being changed, post a ADJUSTMENT ledger entry for the delta
+    if data.opening_qty is not None:
+        old_qty = float(b.opening_qty)
+        new_qty = float(data.opening_qty)
+        delta   = new_qty - old_qty
+        if delta != 0:
+            txn_type = "ADJUSTMENT+" if delta > 0 else "ADJUSTMENT-"
+            post_stock_ledger(
+                db, b.medicine_id, b.batch_id,
+                txn_type=txn_type, qty=abs(delta),
+                ref_type="BatchEdit", ref_id=batch_id, ref_number=f"BATCHEDIT-{batch_id}",
+                created_by=1
+            )
+        b.opening_qty = new_qty
+
+    # Update other editable fields
+    for field in ("batch_no", "mfg_date", "expiry_date", "purchase_price", "sale_price", "mrp"):
+        val = getattr(data, field)
+        if val is not None:
+            setattr(b, field, val)
+
+    db.commit()
+    db.refresh(b)
+    return b
+
+
+@router.delete("/batches/{batch_id}")
+def delete_batch(batch_id: int, db: Session = Depends(get_db)):
+    """Delete a batch — reverses its opening stock from the ledger first"""
+    b = db.query(MedicineBatch).filter(MedicineBatch.batch_id == batch_id).first()
+    if not b:
+        raise HTTPException(404, "Batch not found")
+
+    current_qty = float(b.current_qty)
+    if current_qty > 0:
+        # Reverse whatever stock is in this batch
+        post_stock_ledger(
+            db, b.medicine_id, b.batch_id,
+            txn_type="ADJUSTMENT-", qty=current_qty,
+            ref_type="BatchDelete", ref_id=batch_id, ref_number=f"BATCHDEL-{batch_id}",
+            created_by=1
+        )
+
+    db.delete(b)
+    db.commit()
+    return {"message": "Batch deleted"}
+
+
 @router.get("/stock-ledger", response_model=List[StockLedgerOut])
 def get_stock_ledger(medicine_id: Optional[int] = None, db: Session = Depends(get_db)):
     q = db.query(StockLedger)
     if medicine_id:
         q = q.filter(StockLedger.medicine_id == medicine_id)
     return q.order_by(StockLedger.created_at.desc()).limit(100).all()
+
+
+@router.post("/recalculate-stock")
+def recalculate_all_stock(db: Session = Depends(get_db)):
+    """One-time fix: set medicine.current_stock = sum of all its batch current_qty.
+    Run this once after upgrading to the unified post_stock_ledger flow."""
+    from sqlalchemy import func as sqlfunc
+    medicines = db.query(Medicine).all()
+    corrections = []
+    for m in medicines:
+        total = db.query(sqlfunc.coalesce(sqlfunc.sum(MedicineBatch.current_qty), 0))\
+                   .filter(MedicineBatch.medicine_id == m.medicine_id)\
+                   .scalar() or 0
+        old = float(m.current_stock)
+        m.current_stock = total
+        if abs(float(total) - old) > 0.001:
+            corrections.append({
+                "medicine_id": m.medicine_id,
+                "name": m.medicine_name,
+                "old_stock": old,
+                "corrected_to": float(total)
+            })
+    db.commit()
+    return {"message": f"Recalculated {len(medicines)} medicines", "corrections": corrections}

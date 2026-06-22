@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import api from '../api'
-import { Plus, Pencil } from 'lucide-react'
+import { Plus, Pencil, Trash2 } from 'lucide-react'
 
 export default function Medicines() {
   const [medicines, setMedicines]     = useState([])
@@ -24,14 +24,8 @@ export default function Medicines() {
   }
   const [formData, setFormData] = useState(blankForm)
 
-  // Opening stock state
-  const [currentStock, setCurrentStock]         = useState(0)
-  const [showStockForm, setShowStockForm]       = useState(false)
-  const [stockQty, setStockQty]                 = useState('')
-  const [stockPurchasePrice, setStockPurchasePrice] = useState('')
-  const [stockSalePrice, setStockSalePrice]     = useState('')
-  const [stockMrp, setStockMrp]                 = useState('')
-  const [stockSaving, setStockSaving]           = useState(false)
+  // Live stock counter — computed from sum of all batch current_qty
+  const currentStock = batches.reduce((sum, b) => sum + Number(b.current_qty || 0), 0)
 
   // Batch state
   const [batches, setBatches]           = useState([])
@@ -39,6 +33,12 @@ export default function Medicines() {
   const [batchSaving, setBatchSaving]   = useState(false)
   const blankBatch = { batch_no: '', mfg_date: '', expiry_date: '', purchase_price: '', sale_price: '', mrp: '', opening_qty: '0' }
   const [batchForm, setBatchForm]       = useState(blankBatch)
+
+  // Edit batch state
+  const [editingBatch, setEditingBatch] = useState(null)
+  const [showEditBatchForm, setShowEditBatchForm] = useState(false)
+  const [editBatchForm, setEditBatchForm] = useState({ batch_no: '', mfg_date: '', expiry_date: '', purchase_price: '', sale_price: '', mrp: '', opening_qty: '0' })
+  const [editBatchSaving, setEditBatchSaving] = useState(false)
 
   // HSN quick-add
   const [hsnQuickModal, setHsnQuickModal] = useState(false)
@@ -80,17 +80,13 @@ export default function Medicines() {
       .then(r => setBatches(r.data)).catch(() => setBatches([]))
 
   // ── OPEN / CLOSE MODAL ────────────────────────────────────
-  const resetStockState = () => {
-    setShowStockForm(false); setStockQty(''); setStockPurchasePrice('')
-    setStockSalePrice(''); setStockMrp('')
-  }
+
 
   const handleOpenModal = (med = null) => {
-    resetStockState()
     setShowBatchForm(false); setBatchForm(blankBatch); setBatches([])
+    setShowEditBatchForm(false); setEditingBatch(null)
     if (med) {
       setEditingMedicine(med)
-      setCurrentStock(Number(med.current_stock) || 0)
       setFormData({
         medicine_name:  med.medicine_name,
         medicine_name2: med.medicine_name2 || '',
@@ -105,13 +101,17 @@ export default function Medicines() {
       loadBatches(med.medicine_id)
     } else {
       setEditingMedicine(null)
-      setCurrentStock(0)
       setFormData(blankForm)
     }
     setIsModalOpen(true)
   }
 
-  const closeModal = () => { setIsModalOpen(false); setEditingMedicine(null) }
+  const closeModal = () => {
+    setIsModalOpen(false)
+    setEditingMedicine(null)
+    setShowEditBatchForm(false)
+    setEditingBatch(null)
+  }
 
   // ── SAVE MEDICINE ─────────────────────────────────────────
   const handleSubmit = async (e) => {
@@ -134,7 +134,6 @@ export default function Medicines() {
         const res = await api.post('/inventory/medicines', payload)
         const created = res.data
         setEditingMedicine(created)
-        setCurrentStock(0)
         loadBatches(created.medicine_id)
         fetchMedicines()
         // keep modal open — let user add opening stock immediately
@@ -144,36 +143,7 @@ export default function Medicines() {
     } finally { setSaving(false) }
   }
 
-  // ── QUICK OPENING STOCK ──────────────────────────────────
-  const handleQuickStock = async (e) => {
-    e.preventDefault()
-    e.stopPropagation()
-    const qty = parseFloat(stockQty)
-    if (!qty || qty <= 0) { alert('Please enter a valid quantity greater than 0'); return }
-    setStockSaving(true)
-    try {
-      const now = new Date()
-      // Timestamp-based batch_no — unique on every call, no collision risk
-      const autoBatchNo = `OPG-${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${now.getTime().toString().slice(-5)}`
-      await api.post('/inventory/batches', {
-        medicine_id:    editingMedicine.medicine_id,
-        batch_no:       autoBatchNo,
-        expiry_date:    `${now.getFullYear() + 5}-${String(now.getMonth() + 1).padStart(2, '0')}-01`,
-        purchase_price: parseFloat(stockPurchasePrice) || 0,
-        sale_price:     parseFloat(stockSalePrice)     || 0,
-        mrp:            parseFloat(stockMrp)           || 0,
-        opening_qty:    qty,
-        source:         'Opening'
-      })
-      // Optimistic update — add qty directly; no fragile search-and-find re-fetch
-      setCurrentStock(prev => prev + qty)
-      resetStockState()
-      loadBatches(editingMedicine.medicine_id)
-      fetchMedicines() // refresh table in background
-    } catch (err) {
-      alert('Error adding stock: ' + (err.response?.data?.detail || err.message))
-    } finally { setStockSaving(false) }
-  }
+
 
   // ── ADD BATCH ────────────────────────────────────────────
   const handleAddBatch = async (e) => {
@@ -199,6 +169,55 @@ export default function Medicines() {
     } catch (err) {
       alert('Error: ' + (err.response?.data?.detail || err.message))
     } finally { setBatchSaving(false) }
+  }
+
+  const openEditBatch = (b) => {
+    setEditingBatch(b)
+    setEditBatchForm({
+      batch_no:       b.batch_no,
+      mfg_date:       b.mfg_date   || '',
+      expiry_date:    b.expiry_date || '',
+      purchase_price: String(b.purchase_price),
+      sale_price:     String(b.sale_price),
+      mrp:            String(b.mrp),
+      opening_qty:    String(b.opening_qty),
+    })
+    setShowBatchForm(false)   // close add form if open
+    setShowEditBatchForm(true)
+  }
+
+  const handleEditBatch = async e => {
+    e.preventDefault()
+    if (!editBatchForm.batch_no) return alert('Batch number is required')
+    if (!editBatchForm.expiry_date) return alert('Expiry date is required')
+    setEditBatchSaving(true)
+    try {
+      await api.put(`/inventory/batches/${editingBatch.batch_id}`, {
+        batch_no:       editBatchForm.batch_no,
+        mfg_date:       editBatchForm.mfg_date   || null,
+        expiry_date:    editBatchForm.expiry_date,
+        purchase_price: parseFloat(editBatchForm.purchase_price) || 0,
+        sale_price:     parseFloat(editBatchForm.sale_price)     || 0,
+        mrp:            parseFloat(editBatchForm.mrp)            || 0,
+        opening_qty:    parseFloat(editBatchForm.opening_qty)    || 0,
+      })
+      alert(`Batch ${editBatchForm.batch_no} updated!`)
+      setShowEditBatchForm(false)
+      setEditingBatch(null)
+      loadBatches(editingMedicine.medicine_id)
+      fetchMedicines()
+    } catch (err) { alert('Error: ' + (err.response?.data?.detail || err.message)) }
+    finally { setEditBatchSaving(false) }
+  }
+
+  const handleDeleteBatch = async (b) => {
+    if (!confirm(`Delete batch "${b.batch_no}"? This will reverse ${Number(b.current_qty)} units from stock. This cannot be undone.`)) return
+    try {
+      await api.delete(`/inventory/batches/${b.batch_id}`)
+      alert(`Batch ${b.batch_no} deleted`)
+      loadBatches(editingMedicine.medicine_id)
+      fetchMedicines()
+    } catch (err) { alert('Error: ' + (err.response?.data?.detail || err.message)) }
   }
 
   // ── HSN QUICK SAVE ───────────────────────────────────────
@@ -389,113 +408,40 @@ export default function Medicines() {
                       className="px-5 py-2 border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 text-sm font-medium">Cancel</button>
                     <button type="submit" disabled={saving}
                       className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-bold disabled:opacity-60 transition-colors">
-                      {saving ? 'Saving...' : editingMedicine ? 'Update Medicine' : 'Save & Add Stock'}
+                      {saving ? 'Saving...' : editingMedicine ? 'Update Medicine' : 'Save Medicine'}
                     </button>
                   </div>
                 </div>
               </form>
 
-              {/* ── OPENING STOCK WIDGET ── */}
-              {editingMedicine && (
-                <div className="border-t border-gray-100 pt-5">
-                  <div className="flex items-center justify-between mb-3">
-                    <div>
-                      <h3 className="text-sm font-bold text-gray-700 flex items-center gap-2">
-                        <span className="inline-block w-2 h-2 rounded-full bg-emerald-500"></span>
-                        Opening Stock
-                      </h3>
-                      <p className="text-xs text-gray-400 mt-0.5">Add current stock on hand. Updates Inventory &amp; Stock Ledger instantly.</p>
-                    </div>
-                    {/* Live stock counter */}
-                    <div className={`text-center px-5 py-2 rounded-xl border-2 ${
-                      currentStock <= 0
-                        ? 'border-red-200 bg-red-50'
-                        : currentStock <= Number(formData.reorder_level || 0)
-                          ? 'border-amber-200 bg-amber-50'
-                          : 'border-emerald-200 bg-emerald-50'
-                    }`}>
-                      <div className={`text-2xl font-extrabold leading-none ${
-                        currentStock <= 0 ? 'text-red-600'
-                        : currentStock <= Number(formData.reorder_level || 0) ? 'text-amber-600'
-                        : 'text-emerald-600'
-                      }`}>{currentStock}</div>
-                      <div className="text-[10px] text-gray-500 font-medium mt-0.5 uppercase tracking-wide">In Stock</div>
-                    </div>
-                  </div>
 
-                  {!showStockForm ? (
-                    <button
-                      type="button"
-                      onClick={() => setShowStockForm(true)}
-                      className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border-2 border-dashed border-emerald-300 text-emerald-700 text-sm font-semibold hover:bg-emerald-50 transition-colors"
-                    >
-                      <Plus size={16} /> Add Opening Stock
-                    </button>
-                  ) : (
-                    <form onSubmit={handleQuickStock} className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <h4 className="text-xs font-bold text-emerald-800 uppercase tracking-wide">Add Stock Entry</h4>
-                        <button type="button" onClick={() => { setShowStockForm(false); setStockQty('') }}
-                          className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
-                      </div>
-                      <div className="grid grid-cols-4 gap-3">
-                        <div className="col-span-2">
-                          <label className="block text-xs font-bold text-emerald-800 mb-1">Quantity to Add *</label>
-                          <input
-                            className="w-full border border-emerald-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none text-lg font-bold"
-                            type="number" step="0.01" min="0.01"
-                            value={stockQty} onChange={e => setStockQty(e.target.value)}
-                            placeholder="e.g. 100" autoFocus
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-bold text-emerald-800 mb-1">Purchase Price</label>
-                          <input className="w-full border border-emerald-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none text-sm"
-                            type="number" step="0.01" min="0" value={stockPurchasePrice}
-                            onChange={e => setStockPurchasePrice(e.target.value)} placeholder="0.00" />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-bold text-emerald-800 mb-1">MRP</label>
-                          <input className="w-full border border-emerald-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none text-sm"
-                            type="number" step="0.01" min="0" value={stockMrp}
-                            onChange={e => setStockMrp(e.target.value)} placeholder="0.00" />
-                        </div>
-                        <div className="col-span-2">
-                          <label className="block text-xs font-bold text-emerald-800 mb-1">Sale Price</label>
-                          <input className="w-full border border-emerald-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none text-sm"
-                            type="number" step="0.01" min="0" value={stockSalePrice}
-                            onChange={e => setStockSalePrice(e.target.value)} placeholder="0.00" />
-                        </div>
-                        <div className="col-span-2">
-                          <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-                            Auto batch: <span className="font-mono text-gray-600">OPG-{new Date().getFullYear()}{String(new Date().getMonth()+1).padStart(2,'0')}-{editingMedicine?.medicine_id}</span> · Expiry: 5 yrs
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex gap-2 justify-end pt-1 border-t border-emerald-200">
-                        <button type="button" onClick={() => { setShowStockForm(false); setStockQty('') }}
-                          className="px-4 py-2 border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 text-xs font-medium">Cancel</button>
-                        <button type="submit" disabled={stockSaving || !stockQty}
-                          className="flex items-center gap-2 px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold disabled:opacity-60 transition-colors">
-                          {stockSaving ? 'Adding...' : `Add ${stockQty || 0} Units to Stock`}
-                        </button>
-                      </div>
-                    </form>
-                  )}
-                </div>
-              )}
 
               {/* ── BATCH PANEL ── */}
               {editingMedicine && (
                 <div className="border-t border-gray-100 pt-5">
                   <div className="flex items-center justify-between mb-3">
-                    <div>
-                      <h3 className="text-sm font-bold text-gray-700 flex items-center gap-2">
-                        <span className="inline-block w-2 h-2 rounded-full bg-indigo-500"></span>
-                        Batch Numbers
-                        <span className="text-gray-400 font-normal">({batches.length} batch{batches.length !== 1 ? 'es' : ''})</span>
-                      </h3>
-                      <p className="text-xs text-gray-400 mt-0.5">Opening stock batches. Purchase batches come from Purchase Bills.</p>
+                    <div className="flex items-center gap-3">
+                      <div>
+                        <h3 className="text-sm font-bold text-gray-700 flex items-center gap-2">
+                          <span className="inline-block w-2 h-2 rounded-full bg-indigo-500"></span>
+                          Batch Numbers
+                          <span className="text-gray-400 font-normal">({batches.length} batch{batches.length !== 1 ? 'es' : ''})</span>
+                        </h3>
+                        <p className="text-xs text-gray-400 mt-0.5">Opening stock batches. Purchase batches come from Purchase Bills.</p>
+                      </div>
+                      {/* Stock counter */}
+                      <div className={`ml-auto text-center px-4 py-1.5 rounded-lg border ${
+                        currentStock <= 0 ? 'border-red-200 bg-red-50' :
+                        currentStock <= Number(formData.reorder_level || 0) ? 'border-amber-200 bg-amber-50' :
+                        'border-emerald-200 bg-emerald-50'
+                      }`}>
+                        <div className={`text-xl font-extrabold leading-none ${
+                          currentStock <= 0 ? 'text-red-600' :
+                          currentStock <= Number(formData.reorder_level || 0) ? 'text-amber-600' :
+                          'text-emerald-600'
+                        }`}>{currentStock}</div>
+                        <div className="text-[9px] text-gray-400 font-medium uppercase tracking-wide">In Stock</div>
+                      </div>
                     </div>
                     {!showBatchForm && (
                       <button type="button" onClick={() => setShowBatchForm(true)}
@@ -510,8 +456,8 @@ export default function Medicines() {
                       <table className="w-full text-xs">
                         <thead className="bg-gray-50">
                           <tr>
-                            {['Batch No','Mfg Date','Expiry','Pur.Price','Sale Price','MRP','Qty','Source'].map(h => (
-                              <th key={h} className={`py-2 px-3 text-gray-400 font-semibold uppercase tracking-wide ${h === 'Batch No' || h === 'Mfg Date' || h === 'Expiry' || h === 'Source' ? 'text-left' : 'text-right'}`}>{h}</th>
+                            {['Batch No','Mfg Date','Expiry','Pur.Price','Sale Price','MRP','Qty','Source',''].map(h => (
+                              <th key={h} className={`py-2 px-3 text-gray-400 font-semibold uppercase tracking-wide ${h === 'Batch No' || h === 'Mfg Date' || h === 'Expiry' || h === 'Source' || h === '' ? 'text-left' : 'text-right'}`}>{h}</th>
                             ))}
                           </tr>
                         </thead>
@@ -519,8 +465,9 @@ export default function Medicines() {
                           {batches.map(b => {
                             const isExpired    = b.expiry_date && new Date(b.expiry_date) < new Date()
                             const isNearExpiry = b.expiry_date && !isExpired && (new Date(b.expiry_date) - new Date()) < 90*24*60*60*1000
+                            const isBeingEdited = editingBatch?.batch_id === b.batch_id
                             return (
-                              <tr key={b.batch_id} className="hover:bg-gray-50">
+                              <tr key={b.batch_id} className={`hover:bg-gray-50 ${isBeingEdited ? 'bg-amber-50' : ''}`}>
                                 <td className="py-2 px-3 font-semibold text-indigo-700">{b.batch_no}</td>
                                 <td className="py-2 px-3 text-gray-500">{b.mfg_date || '—'}</td>
                                 <td className="py-2 px-3">
@@ -537,6 +484,26 @@ export default function Medicines() {
                                 <td className="py-2 px-3">
                                   <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-[10px]">{b.source}</span>
                                 </td>
+                                <td className="py-2 px-3">
+                                  <div className="flex gap-1 justify-end">
+                                    <button
+                                      type="button"
+                                      onClick={() => openEditBatch(b)}
+                                      className="p-1 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                                      title="Edit batch"
+                                    >
+                                      <Pencil size={12} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteBatch(b)}
+                                      className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+                                      title="Delete batch"
+                                    >
+                                      <Trash2 size={12} />
+                                    </button>
+                                  </div>
+                                </td>
                               </tr>
                             )
                           })}
@@ -545,7 +512,7 @@ export default function Medicines() {
                     </div>
                   )}
 
-                  {batches.length === 0 && !showBatchForm && (
+                  {batches.length === 0 && !showBatchForm && !showEditBatchForm && (
                     <div className="text-center py-6 text-gray-400 text-sm border border-dashed border-gray-200 rounded-xl">
                       No batches yet. Click "Add Batch" to add opening stock with full details.
                     </div>
@@ -594,6 +561,56 @@ export default function Medicines() {
                         <button type="submit" disabled={batchSaving}
                           className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold disabled:opacity-60 transition-colors">
                           {batchSaving ? 'Adding...' : 'Add Batch'}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  {/* Inline Edit Batch Form */}
+                  {showEditBatchForm && editingBatch && (
+                    <form onSubmit={handleEditBatch} className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <div>
+                          <h4 className="text-xs font-bold text-amber-700 uppercase tracking-wide">Edit Batch — {editingBatch.batch_no}</h4>
+                          <p className="text-[10px] text-amber-600 mt-0.5">Changing Opening Qty will post an adjustment to the stock ledger</p>
+                        </div>
+                        <button type="button" onClick={() => { setShowEditBatchForm(false); setEditingBatch(null) }} className="text-gray-400 hover:text-gray-600 text-lg leading-none">&times;</button>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3">
+                        <div>
+                          <label className="block text-xs font-bold text-amber-700 mb-1">Batch No *</label>
+                          <input className={inp} value={editBatchForm.batch_no} onChange={e => setEditBatchForm(f => ({ ...f, batch_no: e.target.value }))} autoFocus />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-amber-700 mb-1">Mfg Date</label>
+                          <input className={inp} type="date" value={editBatchForm.mfg_date} onChange={e => setEditBatchForm(f => ({ ...f, mfg_date: e.target.value }))} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-amber-700 mb-1">Expiry Date *</label>
+                          <input className={inp} type="date" value={editBatchForm.expiry_date} onChange={e => setEditBatchForm(f => ({ ...f, expiry_date: e.target.value }))} />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-amber-700 mb-1">Purchase Price</label>
+                          <input className={inp} type="number" step="0.01" min="0" value={editBatchForm.purchase_price} onChange={e => setEditBatchForm(f => ({ ...f, purchase_price: e.target.value }))} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-amber-700 mb-1">Sale Price</label>
+                          <input className={inp} type="number" step="0.01" min="0" value={editBatchForm.sale_price} onChange={e => setEditBatchForm(f => ({ ...f, sale_price: e.target.value }))} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-amber-700 mb-1">MRP</label>
+                          <input className={inp} type="number" step="0.01" min="0" value={editBatchForm.mrp} onChange={e => setEditBatchForm(f => ({ ...f, mrp: e.target.value }))} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-amber-700 mb-1">Opening Qty</label>
+                          <input className={`${inp} font-semibold`} type="number" step="0.01" min="0" value={editBatchForm.opening_qty} onChange={e => setEditBatchForm(f => ({ ...f, opening_qty: e.target.value }))} />
+                          <p className="text-[10px] text-amber-600 mt-1">Delta from original ({editingBatch.opening_qty}) posts as stock adjustment</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 justify-end pt-1 border-t border-amber-200">
+                        <button type="button" onClick={() => { setShowEditBatchForm(false); setEditingBatch(null) }} className="px-4 py-2 border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 text-xs font-medium">Cancel</button>
+                        <button type="submit" disabled={editBatchSaving} className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-xs font-bold disabled:opacity-60 transition-colors">
+                          {editBatchSaving ? 'Saving...' : 'Update Batch'}
                         </button>
                       </div>
                     </form>

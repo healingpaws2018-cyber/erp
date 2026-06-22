@@ -19,6 +19,7 @@ from schemas.pharmacy import (
     PharmacyBillCreate, PharmacyBillOut
 )
 from utils.doc_sequence import get_next_doc_no
+from utils.stock import post_stock_ledger
 
 router = APIRouter(prefix="/pharmacy", tags=["Pharmacy"])
 
@@ -67,17 +68,14 @@ def record_purchase(data: PurchaseBillCreate, db: Session = Depends(get_db)):
         )
         db.add(pb_item)
         
-        # 3. Update Inventory (Batches)
+        # 3. Update Inventory (Batches) — find or create the batch
+        total_qty = item.quantity + item.free_quantity
         batch = db.query(MedicineBatch).filter(
             MedicineBatch.medicine_id == item.medicine_id,
             MedicineBatch.batch_no == item.batch_no
         ).first()
         
-        if batch:
-            batch.current_qty += (item.quantity + item.free_quantity)
-            batch.purchase_price = item.purchase_price
-            batch.sale_price = item.sale_price
-        else:
+        if not batch:
             batch = MedicineBatch(
                 medicine_id=item.medicine_id,
                 batch_no=item.batch_no,
@@ -85,30 +83,29 @@ def record_purchase(data: PurchaseBillCreate, db: Session = Depends(get_db)):
                 expiry_date=item.expiry_date,
                 purchase_price=item.purchase_price,
                 sale_price=item.sale_price,
-                current_qty=(item.quantity + item.free_quantity)
+                source="Purchase",
+                current_qty=Decimal("0")   # post_stock_ledger will add qty
             )
             db.add(batch)
-            db.flush()
-            
-        # 4. Update Medicine Master Total Stock
-        med = db.query(Medicine).filter(Medicine.medicine_id == item.medicine_id).first()
-        if med:
-            med.current_stock += (item.quantity + item.free_quantity)
-            
-        # 5. Add Stock Ledger Entry
-        ledger = StockLedger(
+            db.flush()  # get batch_id
+        else:
+            # Update prices on existing batch
+            batch.purchase_price = item.purchase_price
+            batch.sale_price = item.sale_price
+        
+        # 4. Use post_stock_ledger — updates batch.current_qty AND recalculates
+        #    medicine.current_stock as sum of ALL batches (opening + purchase)
+        post_stock_ledger(
+            db,
             medicine_id=item.medicine_id,
             batch_id=batch.batch_id,
-            txn_date=bill.bill_date,
             txn_type="PURCHASE",
-            qty=(item.quantity + item.free_quantity),
-            qty_in=(item.quantity + item.free_quantity),
-            qty_out=0,
+            qty=float(total_qty),
             ref_type="PUR",
             ref_id=bill.bill_id,
-            ref_number=bill.bill_no
+            ref_number=bill.bill_no,
+            created_by=1
         )
-        db.add(ledger)
 
     bill.net_amount = total_net
     db.commit()
@@ -147,23 +144,28 @@ def delete_purchase_bill(bill_id: int, db: Session = Depends(get_db)):
     if not bill:
         raise HTTPException(status_code=404, detail="Bill not found")
     
-    # Stock Reversal logic
+    # Stock Reversal — use post_stock_ledger so current_stock is recalculated from sum
     items = db.query(PurchaseBillItem).filter(PurchaseBillItem.bill_id == bill_id).all()
     for item in items:
-        # Subtract stock from batch
         batch = db.query(MedicineBatch).filter(
             MedicineBatch.medicine_id == item.medicine_id,
             MedicineBatch.batch_no == item.batch_no
         ).first()
         if batch:
-            batch.current_qty -= (item.quantity + item.free_quantity)
-            
-        # Subtract from master
-        med = db.query(Medicine).filter(Medicine.medicine_id == item.medicine_id).first()
-        if med:
-            med.current_stock -= (item.quantity + item.free_quantity)
-            
-        # Delete ledger entries
+            reversal_qty = float(item.quantity + item.free_quantity)
+            post_stock_ledger(
+                db,
+                medicine_id=item.medicine_id,
+                batch_id=batch.batch_id,
+                txn_type="PURCH_RETURN",
+                qty=reversal_qty,
+                ref_type="PUR_DEL",
+                ref_id=bill_id,
+                ref_number=f"DEL-{bill.bill_no}",
+                created_by=1
+            )
+        
+        # Delete ledger entries for this bill
         db.query(StockLedger).filter(
             StockLedger.ref_type == "PUR",
             StockLedger.ref_id == bill_id
@@ -181,7 +183,7 @@ def update_purchase_bill(bill_id: int, data: PurchaseBillCreate, db: Session = D
     if not bill:
         raise HTTPException(status_code=404, detail="Bill not found")
         
-    # 1. Reverse stock for existing items
+    # 1. Reverse stock for existing items via post_stock_ledger
     old_items = db.query(PurchaseBillItem).filter(PurchaseBillItem.bill_id == bill_id).all()
     for item in old_items:
         batch = db.query(MedicineBatch).filter(
@@ -189,12 +191,18 @@ def update_purchase_bill(bill_id: int, data: PurchaseBillCreate, db: Session = D
             MedicineBatch.batch_no == item.batch_no
         ).first()
         if batch:
-            batch.current_qty -= (item.quantity + item.free_quantity)
-            
-        med = db.query(Medicine).filter(Medicine.medicine_id == item.medicine_id).first()
-        if med:
-            med.current_stock -= (item.quantity + item.free_quantity)
-            
+            reversal_qty = float(item.quantity + item.free_quantity)
+            post_stock_ledger(
+                db,
+                medicine_id=item.medicine_id,
+                batch_id=batch.batch_id,
+                txn_type="PURCH_RETURN",
+                qty=reversal_qty,
+                ref_type="PUR_REV",
+                ref_id=bill_id,
+                ref_number=f"REV-{bill.bill_no}",
+                created_by=1
+            )
         db.query(StockLedger).filter(
             StockLedger.ref_type == "PUR",
             StockLedger.ref_id == bill_id
@@ -210,7 +218,7 @@ def update_purchase_bill(bill_id: int, data: PurchaseBillCreate, db: Session = D
     bill.discount_amount = data.discount_amount
     bill.notes = data.notes
     
-    # 4. Re-apply new items (logic copied from record_purchase)
+    # 4. Re-apply new items using post_stock_ledger
     total_net = Decimal("0")
     for item in data.items:
         gross = item.purchase_price * (item.quantity + item.free_quantity)
@@ -233,15 +241,12 @@ def update_purchase_bill(bill_id: int, data: PurchaseBillCreate, db: Session = D
         )
         db.add(pb_item)
         
+        total_qty = item.quantity + item.free_quantity
         batch = db.query(MedicineBatch).filter(
             MedicineBatch.medicine_id == item.medicine_id,
             MedicineBatch.batch_no == item.batch_no
         ).first()
-        if batch:
-            batch.current_qty += (item.quantity + item.free_quantity)
-            batch.purchase_price = item.purchase_price
-            batch.sale_price = item.sale_price
-        else:
+        if not batch:
             batch = MedicineBatch(
                 medicine_id=item.medicine_id,
                 batch_no=item.batch_no,
@@ -249,28 +254,26 @@ def update_purchase_bill(bill_id: int, data: PurchaseBillCreate, db: Session = D
                 expiry_date=item.expiry_date,
                 purchase_price=item.purchase_price,
                 sale_price=item.sale_price,
-                current_qty=(item.quantity + item.free_quantity)
+                source="Purchase",
+                current_qty=Decimal("0")
             )
             db.add(batch)
             db.flush()
+        else:
+            batch.purchase_price = item.purchase_price
+            batch.sale_price = item.sale_price
             
-        med = db.query(Medicine).filter(Medicine.medicine_id == item.medicine_id).first()
-        if med:
-            med.current_stock += (item.quantity + item.free_quantity)
-            
-        ledger = StockLedger(
+        post_stock_ledger(
+            db,
             medicine_id=item.medicine_id,
             batch_id=batch.batch_id,
-            txn_date=bill.bill_date,
             txn_type="PURCHASE",
-            qty=(item.quantity + item.free_quantity),
-            qty_in=(item.quantity + item.free_quantity),
-            qty_out=0,
+            qty=float(total_qty),
             ref_type="PUR",
             ref_id=bill.bill_id,
-            ref_number=bill.bill_no
+            ref_number=bill.bill_no,
+            created_by=1
         )
-        db.add(ledger)
 
     bill.net_amount = total_net
     db.commit()
@@ -328,25 +331,18 @@ def record_sale(data: PharmacyBillCreate, db: Session = Depends(get_db)):
         )
         db.add(pb_item)
         
-        # ── STOCK DEDUCTION ──
-        batch.current_qty -= item.quantity
-        if med:
-            med.current_stock -= item.quantity
-            
-        # Stock Ledger
-        ledger = StockLedger(
+        # ── STOCK DEDUCTION via post_stock_ledger (recalculates medicine.current_stock from sum) ──
+        post_stock_ledger(
+            db,
             medicine_id=item.medicine_id,
             batch_id=batch.batch_id,
-            txn_date=bill.bill_date,
             txn_type="SALE",
-            qty=item.quantity,
-            qty_in=0,
-            qty_out=item.quantity,
+            qty=float(item.quantity),
             ref_type="PHM",
             ref_id=bill.pharmacy_bill_id,
-            ref_number=bill.pharma_bill_no
+            ref_number=bill.pharma_bill_no,
+            created_by=1
         )
-        db.add(ledger)
 
     bill.net_amount = total_net - data.discount_amount
     db.commit()

@@ -92,6 +92,15 @@ class BatchCreate(BaseModel):
     opening_qty: Decimal = Decimal("0")
     source: str = "Opening"
 
+class BatchUpdate(BaseModel):
+    batch_no: Optional[str] = None
+    mfg_date: Optional[date] = None
+    expiry_date: Optional[date] = None
+    purchase_price: Optional[Decimal] = None
+    sale_price: Optional[Decimal] = None
+    mrp: Optional[Decimal] = None
+    opening_qty: Optional[Decimal] = None
+
 class BatchOut(BatchCreate):
     batch_id: int
     current_qty: Decimal

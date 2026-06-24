@@ -14,8 +14,18 @@ from schemas.pharmacy import (
 from utils.doc_sequence import get_next_doc_no
 from utils.gl_utils import create_gl_account
 from utils.stock import post_stock_ledger
+from models.users import User
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
+
+
+def _valid_created_by(db: Session):
+    """Return a real users.user_id in THIS tenant DB, else None.
+
+    Hardcoding 1 triggers a FK violation when the tenant's users table has no
+    user_id=1 (the created_by column is nullable, so None is safe)."""
+    row = db.query(User.user_id).order_by(User.user_id).first()
+    return row[0] if row else None
 
 # ── UNITS ───────────────────────────────────────────────────
 @router.get("/units", response_model=List[UnitOut])
@@ -157,7 +167,7 @@ def create_opening_batch(data: BatchCreate, db: Session = Depends(get_db)):
             db, b.medicine_id, b.batch_id, 
             txn_type="OPENING", qty=qty,
             ref_type="Opening", ref_id=None, ref_number="OPENING",
-            created_by=1 # System user for now
+            created_by=_valid_created_by(db)
         )
     
     db.commit(); db.refresh(b)
@@ -181,7 +191,7 @@ def update_batch(batch_id: int, data: BatchUpdate, db: Session = Depends(get_db)
                 db, b.medicine_id, b.batch_id,
                 txn_type=txn_type, qty=abs(delta),
                 ref_type="BatchEdit", ref_id=batch_id, ref_number=f"BATCHEDIT-{batch_id}",
-                created_by=1
+                created_by=_valid_created_by(db)
             )
         b.opening_qty = new_qty
 
@@ -229,7 +239,7 @@ def delete_batch(batch_id: int, db: Session = Depends(get_db)):
             db, b.medicine_id, b.batch_id,
             txn_type="ADJUSTMENT-", qty=current_qty,
             ref_type="BatchDelete", ref_id=batch_id, ref_number=f"BATCHDEL-{batch_id}",
-            created_by=1
+            created_by=_valid_created_by(db)
         )
 
     # Soft-delete: mark inactive instead of hard delete to preserve FK integrity

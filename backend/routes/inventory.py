@@ -133,10 +133,13 @@ def update_medicine(medicine_id: int, data: MedicineCreate, db: Session = Depend
 # ── BATCHES & STOCK ──────────────────────────────────────────
 @router.get("/batches/{medicine_id}", response_model=List[BatchOut])
 def get_medicine_batches(medicine_id: int, db: Session = Depends(get_db)):
-    """Get all active batches for a medicine"""
+    """Get all active batches for a medicine.
+
+    Treat NULL is_active as active (only an explicit False = soft-deleted), so
+    batches created before the is_active column existed are not hidden."""
     return db.query(MedicineBatch).filter(
         MedicineBatch.medicine_id == medicine_id,
-        MedicineBatch.is_active == True
+        MedicineBatch.is_active.isnot(False)
     ).order_by(MedicineBatch.expiry_date.asc()).all()
 
 @router.post("/batches", response_model=BatchOut)

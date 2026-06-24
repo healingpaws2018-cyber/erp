@@ -155,6 +155,17 @@ try:
                         print(f"➕ Added missing dosage_form/strength columns to medicines in '{c_db_name}'.")
                     except Exception:
                         c_conn.rollback()  # Columns already exist
+
+                    # Auto-migrate is_active soft-delete flag on medicine_batches.
+                    # Critical: backfill existing rows to TRUE, otherwise pre-existing
+                    # batches default to NULL and get filtered out of stock/billing.
+                    try:
+                        c_conn.execute(text("ALTER TABLE medicine_batches ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE"))
+                        c_conn.execute(text("UPDATE medicine_batches SET is_active = TRUE WHERE is_active IS NULL"))
+                        c_conn.commit()
+                        print(f"➕ Ensured medicine_batches.is_active (backfilled NULLs) in '{c_db_name}'.")
+                    except Exception:
+                        c_conn.rollback()
                     
                     # Auto-migrate fin_year from 2526 → 2627 for FY 2026-27
                     try:

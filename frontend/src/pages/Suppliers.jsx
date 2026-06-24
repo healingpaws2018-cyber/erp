@@ -10,7 +10,7 @@ const EMPTY = {
   supplier_code: '', supplier_name: '', contact_person: '',
   phone: '', alt_phone: '', email: '',
   address1: '', address2: '', address3: '', 
-  city_id: '', city_name: '', district: '', state_name: '', state_code: '', pincode: '',
+  city_id: '', city_name: 'Hyderabad', district: '', state_name: 'Telangana', state_code: '36', pincode: '',
   gstin: '', pan: '', drug_license_no: '',
   payment_terms: '', opening_balance: 0, balance_type: 'CR'
 }

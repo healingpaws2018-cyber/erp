@@ -11,7 +11,7 @@ const EMPTY_DOC = {
   name: '', qualification: '', specialization: '', reg_number: '',
   phone: '', alt_phone: '', email: '', 
   address1: '', address2: '', address3: '', 
-  city_id: '', city_name: '', district: '', state_name: '', state_code: '', pincode: '',
+  city_id: '', city_name: 'Hyderabad', district: '', state_name: 'Telangana', state_code: '36', pincode: '',
   pan: '', consultation_fee: '',
   follow_up_fee: '', emergency_fee: '', available_days: '', notes: '',
   doj: '', salary: '', salary_type: 'Fixed', opening_balance: 0, balance_type: 'CR'
@@ -20,7 +20,7 @@ const EMPTY_DOC = {
 const EMPTY_STAFF = {
   name: '', role: '', phone: '', alt_phone: '', email: '',
   address1: '', address2: '', address3: '', 
-  city_id: '', city_name: '', district: '', state_name: '', state_code: '', pincode: '',
+  city_id: '', city_name: 'Hyderabad', district: '', state_name: 'Telangana', state_code: '36', pincode: '',
   pan: '', doj: '', salary: '', notes: '',
   opening_balance: 0, balance_type: 'CR'
 }

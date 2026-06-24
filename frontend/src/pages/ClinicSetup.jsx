@@ -8,7 +8,7 @@ export default function ClinicSetup() {
   const DEFAULTS = {
     clinic_name: '', 
     address1: '', address2: '', address3: '', 
-    city_id: '', city_name: '', district: '', state_name: '', state_code: '',
+    city_id: '', city_name: 'Hyderabad', district: '', state_name: 'Telangana', state_code: '36',
     pincode: '', phone: '', alt_phone: '', email: '',
     website: '', gstin: '', pan: '', reg_number: '', drug_license_no: '',
     fy_start_month: 4

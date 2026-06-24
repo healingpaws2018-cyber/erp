@@ -8,8 +8,8 @@ import FormModal from '../components/FormModal'
 import AddressBlock from '../components/AddressBlock'
 
 const EMPTY = {
-  name: '', address1: '', address2: '', address3: '', city_id: '', city_name: '', 
-  district: '', state_name: '', state_code: '', pincode: '',
+  name: '', address1: '', address2: '', address3: '', city_id: '', city_name: 'Hyderabad',
+  district: '', state_name: 'Telangana', state_code: '36', pincode: '',
   phone: '', alt_phone: '', email: '', gstin: '', pan: '', notes: '',
   opening_balance: 0, balance_type: 'DR', agent_id: '', discount_pct: 0
 }

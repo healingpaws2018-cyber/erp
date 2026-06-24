@@ -111,8 +111,19 @@ def list_medicines(search: Optional[str] = Query(None), include_inactive: bool =
         q = q.filter(Medicine.medicine_name.ilike(f"%{search}%") | Medicine.medicine_name2.ilike(f"%{search}%"))
     
     results = q.order_by(Medicine.medicine_name).all()
+
+    # Compute stock LIVE from active batch quantities so the displayed STOCK never
+    # drifts from reality (the stored current_stock can get out of sync). This keeps
+    # the Medicine Master column consistent with what billing shows per batch.
+    from sqlalchemy import func as sqlfunc
+    sums = dict(
+        db.query(MedicineBatch.medicine_id, sqlfunc.coalesce(sqlfunc.sum(MedicineBatch.current_qty), 0))
+        .filter(MedicineBatch.is_active.isnot(False))
+        .group_by(MedicineBatch.medicine_id).all()
+    )
     for m in results:
         m.gst_pct = m.gst_rate.gst_percent if m.gst_rate else 12
+        m.current_stock = sums.get(m.medicine_id, 0)
     return results
 
 @router.post("/medicines", response_model=MedicineOut)

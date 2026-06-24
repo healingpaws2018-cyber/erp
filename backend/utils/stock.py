@@ -19,12 +19,17 @@ def post_stock_ledger(db, medicine_id, batch_id, txn_type, qty,
     """
     from models.stage3 import StockLedger, Medicine, MedicineBatch
     from sqlalchemy import func as sqlfunc
+    from decimal import Decimal
+
+    # Coerce to Decimal so arithmetic with the Numeric columns (batch.current_qty,
+    # qty_in/qty_out) never mixes Decimal with float — callers may pass float/int.
+    qty = Decimal(str(qty))
 
     IN_TYPES  = {'PURCHASE', 'OPENING', 'SALE_RETURN', 'ADJUSTMENT+'}
     OUT_TYPES = {'SALE', 'PURCH_RETURN', 'ADJUSTMENT-'}
 
-    qty_in  = qty if txn_type in IN_TYPES  else 0
-    qty_out = qty if txn_type in OUT_TYPES else 0
+    qty_in  = qty if txn_type in IN_TYPES  else Decimal(0)
+    qty_out = qty if txn_type in OUT_TYPES else Decimal(0)
 
     # 1. Write to stock_ledger
     entry = StockLedger(

@@ -55,13 +55,11 @@ def post_stock_ledger(db, medicine_id, batch_id, txn_type, qty,
         # We allow negative stock ONLY if the system setting allows it, but default is block
         raise ValueError(f"Insufficient stock in batch {batch.batch_no}. Available: {batch.current_qty + qty_out}")
 
-    # 3. Recalculate medicine.current_stock = sum of all batches
-    total = db.query(sqlfunc.sum(MedicineBatch.current_qty))\
-               .filter(MedicineBatch.medicine_id == medicine_id)\
-               .scalar() or 0
-               
-    medicine = db.query(Medicine).filter_by(medicine_id=medicine_id).first()
+    # 3. Update medicine.current_stock directly with the delta (arithmetic, not aggregate SUM).
+    #    This is reliable regardless of flush/autoflush ordering — no intermediate SELECT needed.
+    medicine = db.query(Medicine).filter_by(medicine_id=medicine_id).with_for_update().first()
     if medicine:
-        medicine.current_stock = total
-
-    # db.flush() is NOT called here. The caller (route) should commit or flush the transaction.
+        medicine.current_stock = float(medicine.current_stock or 0) + float(qty_in) - float(qty_out)
+        # Guard: never go below 0
+        if medicine.current_stock < 0:
+            medicine.current_stock = 0

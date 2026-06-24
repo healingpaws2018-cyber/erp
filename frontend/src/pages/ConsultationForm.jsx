@@ -8,7 +8,8 @@ import PrescriptionPrint from '../components/PrescriptionPrint'
 const VISIT_TYPES = ['OPD', 'Follow-Up', 'Emergency', 'Walk-In']
 const FREQ_OPTIONS = ['Morn/Eve', 'Mor', 'Eve', 'Afternoon', 'Once daily', 'Twice daily', 'Three times daily', 'Every 8 hours', 'Every 12 hours', 'As needed']
 const ROUTE_OPTIONS = ['Oral', 'Topical', 'IV', 'IM', 'SC', 'Intranasal', 'Ophthalmic', 'Otic']
-const FORM_OPTIONS  = ['Tablet', 'Capsule', 'Syrup', 'Injection', 'Drops', 'Ointment', 'Powder', 'Cream']
+const FORM_OPTIONS  = ['Tablet', 'Capsule', 'Syrup', 'Injection', 'Drops', 'Ointment', 'Powder', 'Cream', 'Gel', 'Spray']
+const INSTRUCTION_OPTIONS = ['Before food', 'After food', 'In warm water', 'In cold water', 'With food', 'On empty stomach', 'At bedtime', 'Shake well before use']
 
 const FREQ_MULTIPLIERS = {
   'Morn/Eve': 2,
@@ -48,6 +49,11 @@ const EMPTY_CONSULT = {
   followup_date: '', followup_notes: '', consult_fee: '',
   procedures: []
 }
+
+// Convert Fahrenheit → Celsius for storage (backend stores celsius)
+const fToC = (f) => f ? ((parseFloat(f) - 32) * 5 / 9).toFixed(2) : ''
+// Convert Celsius → Fahrenheit for display
+const cToF = (c) => c ? ((parseFloat(c) * 9 / 5) + 32).toFixed(1) : ''
 
 const EMPTY_RX_ITEM = {
   medicine_name: '', dosage_form: '', strength: '',
@@ -111,7 +117,7 @@ export default function ConsultationForm() {
           consult_date: data.consult_date, consult_time: String(data.consult_time || '').slice(0, 5),
           pet_id: String(data.pet_id), owner_id: String(data.owner_id), doctor_id: String(data.doctor_id),
           appointment_id: data.appointment_id, visit_type: data.visit_type,
-          chief_complaint: data.chief_complaint || '', temp_celsius: data.temp_celsius || '',
+          chief_complaint: data.chief_complaint || '', temp_celsius: data.temp_celsius ? cToF(data.temp_celsius) : '',
           weight_kg: data.weight_kg || '', heart_rate: data.heart_rate || '', resp_rate: data.resp_rate || '',
           clinical_notes: data.clinical_notes || '', diagnosis: data.diagnosis || '',
           advice: data.advice || '', followup_date: data.followup_date || '',
@@ -234,7 +240,7 @@ export default function ConsultationForm() {
         doctor_id:    parseInt(form.doctor_id) || 0,
         visit_type:   form.visit_type || 'OPD',
         chief_complaint: form.chief_complaint || null,
-        temp_celsius: form.temp_celsius ? parseFloat(form.temp_celsius) : null,
+        temp_celsius: form.temp_celsius ? parseFloat(fToC(form.temp_celsius)) : null,
         weight_kg:    form.weight_kg    ? parseFloat(form.weight_kg)    : null,
         heart_rate:   form.heart_rate && !isNaN(form.heart_rate) ? parseInt(form.heart_rate) : null,
         resp_rate:    form.resp_rate && !isNaN(form.resp_rate) ? parseInt(form.resp_rate) : null,
@@ -418,7 +424,7 @@ export default function ConsultationForm() {
               <textarea className="input-field resize-none" rows={2} value={form.chief_complaint} onChange={set('chief_complaint')} disabled={isClosed} placeholder="What brings the patient today?" />
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div><label className="label">Temp (°C)</label><input className="input-field" type="number" step="0.1" value={form.temp_celsius} onChange={set('temp_celsius')} disabled={isClosed} placeholder="38.5" /></div>
+              <div><label className="label">Temp (°F)</label><input className="input-field" type="number" step="0.1" value={form.temp_celsius} onChange={set('temp_celsius')} disabled={isClosed} placeholder="101.3" /></div>
               <div><label className="label">Weight (kg)</label><input className="input-field" type="number" step="0.1" value={form.weight_kg} onChange={set('weight_kg')} disabled={isClosed} /></div>
               <div><label className="label">Heart Rate (bpm)</label><input className="input-field" type="number" value={form.heart_rate} onChange={set('heart_rate')} disabled={isClosed} /></div>
               <div><label className="label">Resp Rate</label><input className="input-field" type="number" value={form.resp_rate} onChange={set('resp_rate')} disabled={isClosed} /></div>
@@ -479,6 +485,21 @@ export default function ConsultationForm() {
               {!isClosed && <button type="button" onClick={addRxItem} className="btn-secondary flex items-center gap-1 text-xs"><Plus size={13} />Add Medicine</button>}
             </div>
 
+            {/* Chief Complaint banner — split on newlines so each complaint shows on its own line */}
+            {form.chief_complaint && (
+              <div className="px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-xl">
+                <span className="text-[10px] font-bold uppercase tracking-wide text-amber-600 block mb-1">Chief Complaint</span>
+                <ul className="space-y-0.5">
+                  {form.chief_complaint.split('\n').map((line, idx) => line.trim()).filter(Boolean).map((line, idx) => (
+                    <li key={idx} className="text-sm text-amber-900 font-medium leading-snug flex items-start gap-1.5">
+                      <span className="text-amber-400 mt-0.5 shrink-0">•</span>
+                      <span>{line}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {rxItems.length === 0 ? (
               <p className="text-slate-400 text-sm">No medicines prescribed yet.</p>
             ) : (
@@ -536,7 +557,13 @@ export default function ConsultationForm() {
                       <div><label className="label">Qty</label><input className="input-field py-1.5 text-xs" type="number" value={item.quantity} onChange={e => setItem(i, 'quantity', e.target.value)} disabled={isClosed} /></div>
                     </div>
                     <div className="mt-2 flex items-end gap-2">
-                      <div className="flex-1"><label className="label">Instructions</label><input className="input-field py-1.5 text-xs" value={item.instructions} onChange={e => setItem(i, 'instructions', e.target.value)} disabled={isClosed} placeholder="After food, shake well..." /></div>
+                      <div className="flex-1">
+                        <label className="label">Instructions</label>
+                        <select className="input-field py-1.5 text-xs" value={item.instructions} onChange={e => setItem(i, 'instructions', e.target.value)} disabled={isClosed}>
+                          <option value="">— Select instruction —</option>
+                          {INSTRUCTION_OPTIONS.map(o => <option key={o}>{o}</option>)}
+                        </select>
+                      </div>
                       {!isClosed && <button type="button" onClick={() => removeItem(i)} className="p-1.5 text-red-400 hover:text-red-600 mb-0.5"><Trash2 size={14} /></button>}
                     </div>
                   </div>
@@ -560,14 +587,16 @@ export default function ConsultationForm() {
         <PrescriptionPrint
           consultation={{
             ...consultation,
-            doctor_id:    parseInt(form.doctor_id) || consultation?.doctor_id,
-            temp_celsius:  form.temp_celsius,
-            weight_kg:     form.weight_kg,
-            heart_rate:    form.heart_rate,
-            resp_rate:     form.resp_rate,
-            diagnosis:     form.diagnosis,
-            advice:        form.advice,
-            followup_date: form.followup_date,
+            doctor_id:      parseInt(form.doctor_id) || consultation?.doctor_id,
+            temp_fahrenheit: form.temp_celsius,   // form stores °F value in temp_celsius field
+            temp_celsius:    form.temp_celsius ? fToC(form.temp_celsius) : null,
+            weight_kg:       form.weight_kg,
+            heart_rate:      form.heart_rate,
+            resp_rate:       form.resp_rate,
+            chief_complaint: form.chief_complaint,
+            diagnosis:       form.diagnosis,
+            advice:          form.advice,
+            followup_date:   form.followup_date,
           }}
           rxData={existingRx}
           pet={selectedPet}

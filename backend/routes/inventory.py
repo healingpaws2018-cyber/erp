@@ -133,9 +133,10 @@ def update_medicine(medicine_id: int, data: MedicineCreate, db: Session = Depend
 # ── BATCHES & STOCK ──────────────────────────────────────────
 @router.get("/batches/{medicine_id}", response_model=List[BatchOut])
 def get_medicine_batches(medicine_id: int, db: Session = Depends(get_db)):
-    """Get all batches for a medicine"""
+    """Get all active batches for a medicine"""
     return db.query(MedicineBatch).filter(
-        MedicineBatch.medicine_id == medicine_id
+        MedicineBatch.medicine_id == medicine_id,
+        MedicineBatch.is_active == True
     ).order_by(MedicineBatch.expiry_date.asc()).all()
 
 @router.post("/batches", response_model=BatchOut)
@@ -194,10 +195,29 @@ def update_batch(batch_id: int, data: BatchUpdate, db: Session = Depends(get_db)
 
 @router.delete("/batches/{batch_id}")
 def delete_batch(batch_id: int, db: Session = Depends(get_db)):
-    """Delete a batch — reverses its opening stock from the ledger first"""
+    """Soft-delete a batch — reverses its stock from the ledger and marks it inactive.
+    Hard delete is intentionally avoided because stock_ledger, sales_bill_items,
+    purchase_bill_items, and pharmacy_bill_items all have FK references to batch_id."""
+    from models.phase3 import PurchaseBillItem, PharmacyBillItem
+
     b = db.query(MedicineBatch).filter(MedicineBatch.batch_id == batch_id).first()
     if not b:
         raise HTTPException(404, "Batch not found")
+
+    # Block deletion if this batch has been used in any purchase or pharmacy bill
+    used_in_purchase = db.query(PurchaseBillItem).filter(
+        PurchaseBillItem.batch_id == batch_id
+    ).first()
+    used_in_pharmacy = db.query(PharmacyBillItem).filter(
+        PharmacyBillItem.batch_id == batch_id
+    ).first()
+
+    if used_in_purchase or used_in_pharmacy:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Batch '{b.batch_no}' cannot be deleted because it has been used in bills. "
+                   "You can edit the batch details instead."
+        )
 
     current_qty = float(b.current_qty)
     if current_qty > 0:
@@ -209,7 +229,8 @@ def delete_batch(batch_id: int, db: Session = Depends(get_db)):
             created_by=1
         )
 
-    db.delete(b)
+    # Soft-delete: mark inactive instead of hard delete to preserve FK integrity
+    b.is_active = False
     db.commit()
     return {"message": "Batch deleted"}
 
@@ -219,7 +240,38 @@ def get_stock_ledger(medicine_id: Optional[int] = None, db: Session = Depends(ge
     q = db.query(StockLedger)
     if medicine_id:
         q = q.filter(StockLedger.medicine_id == medicine_id)
-    return q.order_by(StockLedger.created_at.desc()).limit(100).all()
+    rows = q.order_by(StockLedger.created_at.desc()).limit(100).all()
+
+    # Resolve item & batch names for display (avoid N+1 with a couple of lookups).
+    med_ids = {r.medicine_id for r in rows}
+    batch_ids = {r.batch_id for r in rows}
+    med_names = dict(
+        db.query(Medicine.medicine_id, Medicine.medicine_name)
+        .filter(Medicine.medicine_id.in_(med_ids)).all()
+    ) if med_ids else {}
+    batch_nos = dict(
+        db.query(MedicineBatch.batch_id, MedicineBatch.batch_no)
+        .filter(MedicineBatch.batch_id.in_(batch_ids)).all()
+    ) if batch_ids else {}
+
+    out = []
+    for r in rows:
+        out.append({
+            "ledger_id": r.ledger_id,
+            "medicine_id": r.medicine_id,
+            "medicine_name": med_names.get(r.medicine_id),
+            "batch_id": r.batch_id,
+            "batch_no": batch_nos.get(r.batch_id),
+            "txn_date": r.txn_date,
+            "txn_type": r.txn_type,
+            "qty_in": r.qty_in,
+            "qty_out": r.qty_out,
+            "ref_type": r.ref_type,
+            "ref_number": r.ref_number,
+            "notes": r.notes,
+            "created_at": r.created_at,
+        })
+    return out
 
 
 @router.post("/recalculate-stock")

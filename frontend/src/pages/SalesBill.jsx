@@ -34,6 +34,9 @@ export default function SalesBill() {
   const [searchNo, setSearchNo] = useState('')
   const [showPrint, setShowPrint] = useState(false)
   const [printBillData, setPrintBillData] = useState(null)
+  const [withGst, setWithGst] = useState(true)   // GST toggle — false = no tax applied
+  const [petPrescriptions, setPetPrescriptions] = useState([])
+  const [showRxPicker, setShowRxPicker] = useState(false)
 
   const [form, setForm] = useState({
     bill_date: new Date().toISOString().split('T')[0],
@@ -92,6 +95,69 @@ export default function SalesBill() {
     } catch (err) { console.error(err) }
   }
 
+  // Fetch all prescriptions for a pet so the user can pull prescribed meds into the bill.
+  const loadPrescriptionsForPet = async (petId) => {
+    if (!petId) { setPetPrescriptions([]); return }
+    try {
+      const res = await api.get(`/prescriptions/pet/${petId}`)
+      // Newest first, and only prescriptions that actually have medicine items.
+      const rxs = (res.data || []).filter(rx => rx.items && rx.items.length > 0)
+      setPetPrescriptions(rxs)
+    } catch (err) { setPetPrescriptions([]) }
+  }
+
+  // Map a prescription item to a product in the medicines master:
+  // prefer the linked medicine_id, otherwise fall back to a case-insensitive name match.
+  const resolveMedicine = (rxItem) => {
+    if (rxItem.medicine_id) {
+      const byId = medicines.find(m => m.medicine_id === rxItem.medicine_id)
+      if (byId) return byId
+    }
+    const name = (rxItem.medicine_name || '').trim().toLowerCase()
+    return medicines.find(m => (m.medicine_name || '').trim().toLowerCase() === name) || null
+  }
+
+  // Pull the prescribed medicines of one prescription into the bill as line items.
+  // Product name is pre-filled; the user picks the batch (which sets the rate) and qty.
+  const applyPrescription = (rx) => {
+    const newLines = []
+    const unmatched = []
+    rx.items.forEach(it => {
+      const med = resolveMedicine(it)
+      if (!med) { unmatched.push(it.medicine_name); return }
+      fetchMedicineBatches(med.medicine_id)
+      newLines.push({
+        ...EMPTY_LINE,
+        id: Date.now() + Math.random(),
+        line_type: 'Medicine',
+        medicine_id: String(med.medicine_id),
+        batch_id: 'auto',                              // FEFO by default; user can override
+        qty: it.quantity ? parseFloat(it.quantity) : 1, // editable default
+        rate: 0,                                        // set per batch on split / save
+        discount_pct: 0,
+        gst_pct: med.gst_pct,
+      })
+    })
+
+    if (newLines.length === 0) {
+      toast.error('None of the prescribed medicines matched a product in inventory')
+      return
+    }
+
+    setForm(f => {
+      // Drop the blank starter line, keep any lines the user already filled.
+      const kept = f.items.filter(l => l.medicine_id || l.procedure_id)
+      return { ...f, items: [...kept, ...newLines] }
+    })
+
+    if (unmatched.length) {
+      toast(`Loaded ${newLines.length}. No product match for: ${unmatched.join(', ')}`, { icon: '⚠️', duration: 5000 })
+    } else {
+      toast.success(`Loaded ${newLines.length} prescribed medicine(s) — select batch & qty`)
+    }
+    setShowRxPicker(false)
+  }
+
   const addLine = () => setForm(f => ({ ...f, items: [...f.items, { ...EMPTY_LINE, id: Date.now() }] }))
   const removeLine = (id) => setForm(f => ({ ...f, items: f.items.filter(l => l.id !== id) }))
 
@@ -103,6 +169,8 @@ export default function SalesBill() {
         fetchMedicineBatches(value)
         const med = medicines.find(m => m.medicine_id === parseInt(value))
         if(med) updated.gst_pct = med.gst_pct
+        updated.batch_id = 'auto'   // default to FEFO auto-allocation
+        updated.rate = 0
       }
       if (field === 'batch_id' && value) {
         const batch = batches[l.medicine_id]?.find(b => b.batch_id === parseInt(value))
@@ -120,7 +188,59 @@ export default function SalesBill() {
     setForm({ ...form, items: newItems })
   }
 
+  // Total stock for a medicine across all its batches.
+  const totalAvailable = (medId) =>
+    (batches[medId] || []).reduce((s, b) => s + parseFloat(b.current_qty || 0), 0)
+
+  // FEFO allocation: split `qty` across a medicine's batches, earliest expiry first.
+  // Returns { lines } or { error } if there isn't enough total stock.
+  const allocateFEFO = (medId, qty, base = {}) => {
+    const list = (batches[medId] || [])
+      .filter(b => parseFloat(b.current_qty) > 0)
+      .sort((a, b) => new Date(a.expiry_date) - new Date(b.expiry_date))
+    const total = list.reduce((s, b) => s + parseFloat(b.current_qty), 0)
+    let remaining = parseFloat(qty) || 0
+    if (remaining <= 0) return { error: 'Enter a quantity first' }
+    if (remaining > total) {
+      const name = medicines.find(m => m.medicine_id === parseInt(medId))?.medicine_name || 'medicine'
+      return { error: `Only ${total} of ${name} in stock across ${list.length} batch(es)` }
+    }
+    const lines = []
+    for (const b of list) {
+      if (remaining <= 0) break
+      const take = Math.min(remaining, parseFloat(b.current_qty))
+      lines.push({
+        ...EMPTY_LINE,
+        ...base,
+        id: Date.now() + Math.random(),
+        line_type: 'Medicine',
+        medicine_id: String(medId),
+        batch_id: String(b.batch_id),
+        qty: take,
+        rate: parseFloat(b.sale_price) || 0,
+      })
+      remaining -= take
+    }
+    return { lines }
+  }
+
+  // Replace one "Auto" line in-place with its concrete per-batch lines.
+  const autoAllocateLine = (lineId) => {
+    const l = form.items.find(x => x.id === lineId)
+    if (!l || !l.medicine_id) return toast.error('Select a medicine first')
+    const { lines, error } = allocateFEFO(l.medicine_id, l.qty, { discount_pct: l.discount_pct, gst_pct: l.gst_pct })
+    if (error) return toast.error(error)
+    setForm(f => {
+      const idx = f.items.findIndex(x => x.id === lineId)
+      const items = [...f.items]
+      items.splice(idx, 1, ...lines)
+      return { ...f, items }
+    })
+    toast.success(`Split across ${lines.length} batch${lines.length > 1 ? 'es' : ''} (earliest expiry first)`)
+  }
+
   const calculateGstSummary = () => {
+    if (!withGst) return []   // No GST slabs when billing without GST
     const slabs = {}
     form.items.forEach(l => {
       const gross = (parseFloat(l.rate) || 0) * (parseFloat(l.qty) || 0)
@@ -138,6 +258,15 @@ export default function SalesBill() {
   }
 
   const calculateTotals = () => {
+    if (!withGst) {
+      // Without GST: grand total = sum of (rate × qty × (1 - discount%))
+      const grandTotal = form.items.reduce((acc, l) => {
+        const gross = (parseFloat(l.rate) || 0) * (parseFloat(l.qty) || 0)
+        const disc = gross * ((parseFloat(l.discount_pct) || 0) / 100)
+        return acc + (gross - disc)
+      }, 0)
+      return { subtotal: grandTotal, totalTax: 0, grandTotal: Math.round(grandTotal) }
+    }
     const summary = calculateGstSummary()
     const subtotal = summary.reduce((acc, s) => acc + s.taxable, 0)
     const totalTax = summary.reduce((acc, s) => acc + s.taxAmount, 0)
@@ -146,14 +275,26 @@ export default function SalesBill() {
 
   const handleSave = async () => {
     if (!form.owner_id) return toast.error('Please select an Owner')
-    if (form.items.some(l => (l.line_type==='Medicine' && !l.batch_id) || (l.line_type==='Procedure' && !l.procedure_id))) {
-      return toast.error('All lines must have an item selected')
+    if (form.items.some(l => (l.line_type==='Medicine' && (!l.medicine_id || !l.batch_id)) || (l.line_type==='Procedure' && !l.procedure_id))) {
+      return toast.error('Each line needs a product (and batch / Auto) selected')
+    }
+
+    // Expand any remaining "Auto (FEFO)" medicine lines into concrete per-batch lines.
+    let expandedItems = []
+    for (const l of form.items) {
+      if (l.line_type === 'Medicine' && l.batch_id === 'auto') {
+        const { lines, error } = allocateFEFO(l.medicine_id, l.qty, { discount_pct: l.discount_pct, gst_pct: l.gst_pct })
+        if (error) return toast.error(error)
+        expandedItems.push(...lines)
+      } else {
+        expandedItems.push(l)
+      }
     }
 
     setSaving(true)
     try {
       // Format items for backend
-      const items = form.items.map((l, idx) => ({
+      const items = expandedItems.map((l, idx) => ({
         line_no: idx + 1,
         line_type: l.line_type,
         medicine_id: l.medicine_id ? parseInt(l.medicine_id) : null,
@@ -164,7 +305,7 @@ export default function SalesBill() {
         discount_pct: parseFloat(l.discount_pct)
       }))
 
-      const payload = { ...form, items }
+      const payload = { ...form, with_gst: withGst, items }
 
       let savedBill = null
       if (editingBillId) {
@@ -183,7 +324,11 @@ export default function SalesBill() {
       }
       setActiveTab('history')
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Error saving bill')
+      const detail = err.response?.data?.detail
+      const msg = Array.isArray(detail)
+        ? detail.map(e => `${e.loc?.slice(-1)[0] ?? ''}: ${e.msg}`).join('; ')
+        : (typeof detail === 'string' ? detail : 'Error saving bill')
+      toast.error(msg)
     } finally {
       setSaving(false)
     }
@@ -200,6 +345,8 @@ export default function SalesBill() {
       items: [{ ...EMPTY_LINE }]
     })
     setEditingBillId(null)
+    setPetPrescriptions([])
+    setShowRxPicker(false)
   }
 
   const handleEdit = (bill) => {
@@ -223,6 +370,7 @@ export default function SalesBill() {
       }))
     })
     if (bill.owner_id) fetchOwnerPets(bill.owner_id)
+    if (bill.pet_id) loadPrescriptionsForPet(bill.pet_id)
     bill.items.forEach(i => { if(i.medicine_id) fetchMedicineBatches(i.medicine_id) })
     setActiveTab('new')
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -314,7 +462,7 @@ export default function SalesBill() {
               </div>
               <div>
                 <label className="label flex items-center gap-2"><PawPrint size={14}/> Pet Name</label>
-                <select className="input-field h-11 text-sm font-bold" value={form.pet_id} onChange={e => setForm({...form, pet_id: e.target.value})}>
+                <select className="input-field h-11 text-sm font-bold" value={form.pet_id} onChange={e => { setForm({...form, pet_id: e.target.value}); loadPrescriptionsForPet(e.target.value); }}>
                   <option value="">Select Pet...</option>
                   {pets.map(p => <option key={p.pet_id} value={p.pet_id}>{p.name}</option>)}
                 </select>
@@ -331,6 +479,87 @@ export default function SalesBill() {
                 <input type="date" className="input-field h-11 font-bold" value={form.bill_date} onChange={e => setForm({...form, bill_date: e.target.value})} />
               </div>
             </div>
+
+            {/* GST / NON-GST TOGGLE */}
+            <div className="mb-6 flex items-center gap-4 p-3 bg-slate-50 rounded-2xl border border-slate-100">
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Billing Mode:</span>
+              <div className="flex bg-white rounded-xl p-0.5 border border-slate-200 shadow-inner">
+                <button
+                  type="button"
+                  onClick={() => setWithGst(true)}
+                  className={`px-4 py-1.5 rounded-lg text-xs font-black uppercase tracking-widest transition-all ${
+                    withGst ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-600'
+                  }`}
+                >
+                  With GST
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setWithGst(false)}
+                  className={`px-4 py-1.5 rounded-lg text-xs font-black uppercase tracking-widest transition-all ${
+                    !withGst ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-600'
+                  }`}
+                >
+                  Without GST
+                </button>
+              </div>
+              {!withGst && (
+                <span className="text-[10px] text-emerald-600 font-bold bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200">
+                  ✓ Tax-exempt billing — only sale price used
+                </span>
+              )}
+            </div>
+
+            {/* LOAD FROM PRESCRIPTION */}
+            {form.pet_id && (
+              <div className="mb-6">
+                {petPrescriptions.length === 0 ? (
+                  <div className="text-[11px] text-slate-400 font-bold italic flex items-center gap-2">
+                    <Info size={14} /> No prescriptions found for this pet.
+                  </div>
+                ) : (
+                  <div className="bg-violet-50 border border-violet-100 rounded-2xl p-4">
+                    <button
+                      type="button"
+                      onClick={() => setShowRxPicker(s => !s)}
+                      className="flex items-center gap-2 text-xs font-black uppercase tracking-widest text-violet-700 hover:text-violet-900 transition-colors"
+                    >
+                      <Stethoscope size={16} />
+                      Load from Prescription ({petPrescriptions.length})
+                      <ArrowRight size={14} className={`transition-transform ${showRxPicker ? 'rotate-90' : ''}`} />
+                    </button>
+
+                    {showRxPicker && (
+                      <div className="mt-4 space-y-2">
+                        {petPrescriptions.map(rx => (
+                          <div key={rx.prescription_id} className="bg-white rounded-xl border border-violet-100 p-3 flex items-center justify-between gap-4">
+                            <div className="min-w-0">
+                              <div className="text-xs font-black text-slate-700 font-mono">{rx.rx_no}</div>
+                              <div className="text-[10px] text-slate-400 font-bold flex items-center gap-1">
+                                <Calendar size={10} /> {new Date(rx.rx_date).toLocaleDateString()}
+                              </div>
+                              <div className="text-[11px] text-slate-500 mt-1 truncate">
+                                {rx.items.map(i => i.medicine_name).join(', ')}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => applyPrescription(rx)}
+                              className="shrink-0 px-3 py-2 bg-violet-600 text-white text-[10px] font-black uppercase tracking-widest rounded-lg hover:bg-violet-700 transition-all active:scale-95 flex items-center gap-1.5"
+                            >
+                              <Plus size={12} /> Add {rx.items.length} Med{rx.items.length > 1 ? 's' : ''}
+                            </button>
+                          </div>
+                        ))}
+                        <p className="text-[10px] text-violet-500 font-bold pt-1">
+                          Medicines are added with names pre-filled. Select a batch and enter the quantity for each.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* BILL LINES */}
             <div className="overflow-x-auto -mx-6 px-6 mb-6">
@@ -371,10 +600,22 @@ export default function SalesBill() {
                       </td>
                       <td className="px-4 py-3">
                         {l.line_type === 'Medicine' && (
-                          <select className="input-field py-1.5 text-[10px] font-black uppercase text-indigo-600" value={l.batch_id} onChange={e => updateLine(l.id, 'batch_id', e.target.value)}>
-                            <option value="">Batch...</option>
-                            {batches[l.medicine_id]?.map(b => <option key={b.batch_id} value={b.batch_id}>{b.batch_no} ({b.current_qty} Avl)</option>)}
-                          </select>
+                          <div className="flex flex-col gap-1">
+                            <select className="input-field py-1.5 text-[10px] font-black uppercase text-indigo-600" value={l.batch_id} onChange={e => updateLine(l.id, 'batch_id', e.target.value)}>
+                              <option value="">Batch...</option>
+                              {l.medicine_id && <option value="auto">⚡ Auto FEFO — {totalAvailable(l.medicine_id)} avl</option>}
+                              {batches[l.medicine_id]?.map(b => <option key={b.batch_id} value={b.batch_id}>{b.batch_no} ({b.current_qty} Avl)</option>)}
+                            </select>
+                            {l.batch_id === 'auto' && l.medicine_id && (
+                              <button
+                                type="button"
+                                onClick={() => autoAllocateLine(l.id)}
+                                className="text-[9px] font-black uppercase tracking-tighter text-emerald-600 hover:text-emerald-800 flex items-center gap-1"
+                              >
+                                <ArrowRight size={10} /> Split {l.qty || 0} across batches
+                              </button>
+                            )}
+                          </div>
                         )}
                       </td>
                       <td className="px-4 py-3">
@@ -405,6 +646,8 @@ export default function SalesBill() {
             {/* GST Summary & TOTALS AREA */}
             <div className="flex flex-col md:flex-row justify-between gap-12 border-t border-slate-100 pt-8">
               <div className="flex-1 max-w-lg">
+                {/* GST Summary table — hidden in Without-GST mode */}
+              {withGst ? (
                 <div className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
                   <table className="w-full text-[11px]">
                     <thead>
@@ -431,6 +674,15 @@ export default function SalesBill() {
                     </tbody>
                   </table>
                 </div>
+              ) : (
+                <div className="bg-emerald-50 rounded-2xl p-4 border border-emerald-100 flex items-center gap-3">
+                  <span className="text-2xl">🧾</span>
+                  <div>
+                    <div className="text-xs font-black text-emerald-700 uppercase tracking-wide">Without GST Mode</div>
+                    <div className="text-[10px] text-emerald-600 mt-0.5">No tax applied. Bill uses sale price only.</div>
+                  </div>
+                </div>
+              )}
 
                 <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div>
@@ -451,18 +703,31 @@ export default function SalesBill() {
 
               <div className="space-y-4">
                 <div className="bg-slate-50 p-6 rounded-3xl space-y-3 border border-slate-100">
-                  <div className="flex justify-between items-center text-sm font-bold text-slate-500">
-                    <span className="uppercase tracking-widest text-[10px]">Net Taxable:</span>
-                    <span className="font-mono">₹{subtotal.toLocaleString()}</span>
-                  </div>
-                  <div className="flex justify-between items-center text-sm font-bold text-indigo-500">
-                    <span className="uppercase tracking-widest text-[10px]">GST (CGST+SGST):</span>
-                    <span className="font-mono">+ ₹{totalTax.toLocaleString()}</span>
-                  </div>
+                  {withGst ? (
+                    <>
+                      <div className="flex justify-between items-center text-sm font-bold text-slate-500">
+                        <span className="uppercase tracking-widest text-[10px]">Net Taxable:</span>
+                        <span className="font-mono">₹{subtotal.toLocaleString()}</span>
+                      </div>
+                      <div className="flex justify-between items-center text-sm font-bold text-indigo-500">
+                        <span className="uppercase tracking-widest text-[10px]">GST (CGST+SGST):</span>
+                        <span className="font-mono">+ ₹{totalTax.toLocaleString()}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex justify-between items-center text-sm font-bold text-slate-500">
+                      <span className="uppercase tracking-widest text-[10px]">Subtotal (excl. GST):</span>
+                      <span className="font-mono">₹{subtotal.toLocaleString()}</span>
+                    </div>
+                  )}
                   <div className="pt-4 border-t border-slate-200 mt-4 flex justify-between items-center">
                     <div className="flex flex-col">
-                      <span className="text-[10px] font-black uppercase text-slate-400 tracking-tighter">Grand Total (Rounded)</span>
-                      <span className="text-xs text-indigo-400 font-bold uppercase tracking-widest italic">Payable Amount</span>
+                      <span className="text-[10px] font-black uppercase text-slate-400 tracking-tighter">
+                        {withGst ? 'Grand Total (Rounded)' : 'Total (No GST, Rounded)'}
+                      </span>
+                      <span className={`text-xs font-bold uppercase tracking-widest italic ${withGst ? 'text-indigo-400' : 'text-emerald-500'}`}>
+                        Payable Amount
+                      </span>
                     </div>
                     <span className="text-4xl font-black text-slate-900">₹{grandTotal.toLocaleString()}</span>
                   </div>

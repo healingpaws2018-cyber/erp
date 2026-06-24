@@ -184,11 +184,22 @@ export default function Inventory() {
         <Table
           columns={[
             { key: 'created_at',    label: 'Timestamp', render: v => new Date(v).toLocaleString() },
+            { key: 'medicine_name', label: 'Item', render: (v, row) => (
+              <div>
+                <div className="font-semibold text-slate-700">{v || `#${row.medicine_id}`}</div>
+                {row.batch_no && <div className="text-[10px] text-slate-400">Batch: {row.batch_no}</div>}
+              </div>
+            )},
             { key: 'txn_type',      label: 'Type', render: v => (
               <span className={`badge ${v === 'Purchase' ? 'bg-blue-100 text-blue-700' : 'bg-amber-100 text-amber-700'}`}>{v}</span>
             )},
             { key: 'ref_type',      label: 'Ref' },
-            { key: 'qty',           label: 'Qty Change', render: v => v > 0 ? <span className="text-green-600 font-bold">+{v}</span> : <span className="text-red-600 font-bold">{v}</span> },
+            { key: 'qty_in',        label: 'Qty Change', render: (_, row) => {
+              const net = Number(row.qty_in || 0) - Number(row.qty_out || 0)
+              return net > 0
+                ? <span className="text-green-600 font-bold">+{net}</span>
+                : <span className="text-red-600 font-bold">{net}</span>
+            }},
           ]}
           data={ledger}
           emptyText="No stock movements recorded."

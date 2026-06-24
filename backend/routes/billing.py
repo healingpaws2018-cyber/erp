@@ -10,12 +10,24 @@ from schemas.billing import SalesBillCreate, SalesBillOut
 from utils.billing import calculate_line_item, calculate_bill_totals
 from utils.stock import post_stock_ledger
 from utils.doc_sequence import get_next_doc_no
+from models.users import User
 
 router = APIRouter(prefix="/billing/sales", tags=["Billing"])
+
+
+def _valid_created_by(db: Session):
+    """Return a real users.user_id in THIS (tenant) DB, else None.
+
+    Bills are saved into a per-tenant company DB whose users table may not
+    contain user_id=1, so hardcoding it triggers a FK violation. We fall back
+    to the first existing user, or None (the created_by column is nullable)."""
+    row = db.query(User.user_id).order_by(User.user_id).first()
+    return row[0] if row else None
 
 @router.post("/confirm", response_model=SalesBillOut)
 def confirm_sales_bill(data: SalesBillCreate, db: Session = Depends(get_db)):
     """Creates and CONFIRMS a sales bill. Posts to stock ledger immediately."""
+    created_by = _valid_created_by(db)
     clinic = db.query(ClinicSetup).first()
     if not clinic: raise HTTPException(400, "Clinic Setup missing")
     
@@ -56,6 +68,16 @@ def confirm_sales_bill(data: SalesBillCreate, db: Session = Depends(get_db)):
         if not gst_rate: raise HTTPException(400, "GST Rate missing")
             
         calc = calculate_line_item(line.rate, line.qty, line.discount_pct, gst_rate, is_interstate)
+
+        # Without-GST mode: zero out all tax fields, line total = taxable amount only
+        if not data.with_gst:
+            calc.update({
+                "cgst_pct": 0, "cgst_amt": 0,
+                "sgst_pct": 0, "sgst_amt": 0,
+                "igst_pct": 0, "igst_amt": 0,
+                "total_tax": 0,
+                "line_total": calc["taxable_amt"],
+            })
         
         item_data = {
             **line.model_dump(),
@@ -72,12 +94,12 @@ def confirm_sales_bill(data: SalesBillCreate, db: Session = Depends(get_db)):
     
     bill_no = get_next_doc_no(db, "SB")
     bill = SalesBill(
-        **data.model_dump(exclude={"items"}),
+        **data.model_dump(exclude={"items", "with_gst"}),
         **totals,
         bill_number=bill_no,
         is_interstate=is_interstate,
         status="Confirmed",
-        created_by=1
+        created_by=created_by
     )
     db.add(bill)
     db.flush()
@@ -85,13 +107,13 @@ def confirm_sales_bill(data: SalesBillCreate, db: Session = Depends(get_db)):
     for i_data in processed_lines:
         item = SalesBillItem(**i_data, bill_id=bill.bill_id)
         db.add(item)
-        
+
         if item.line_type == 'Medicine':
             post_stock_ledger(
-                db, item.medicine_id, item.batch_id, 
+                db, item.medicine_id, item.batch_id,
                 txn_type="SALE", qty=item.qty,
                 ref_type="SalesBill", ref_id=bill.bill_id, ref_number=bill.bill_number,
-                created_by=1
+                created_by=created_by
             )
 
     db.commit()
@@ -167,12 +189,23 @@ def update_sales_bill(bill_id: int, data: SalesBillCreate, db: Session = Depends
 
         gst_rate = db.query(GstRate).filter(GstRate.gst_rate_id == gst_rate_id).first()
         calc = calculate_line_item(line.rate, line.qty, line.discount_pct, gst_rate, is_interstate)
+
+        # Without-GST mode: zero out all tax fields
+        if not data.with_gst:
+            calc.update({
+                "cgst_pct": 0, "cgst_amt": 0,
+                "sgst_pct": 0, "sgst_amt": 0,
+                "igst_pct": 0, "igst_amt": 0,
+                "total_tax": 0,
+                "line_total": calc["taxable_amt"],
+            })
+
         processed_lines.append({**line.model_dump(), **calc, "description": description, "hsn_code": hsn, "unit": unit, "gst_rate_id": gst_rate_id, "gst_pct": gst_rate.gst_percent})
 
     totals = calculate_bill_totals(processed_lines)
     
     # Update header
-    for key, val in data.model_dump(exclude={"items"}).items():
+    for key, val in data.model_dump(exclude={"items", "with_gst"}).items():
         setattr(bill, key, val)
     for key, val in totals.items():
         setattr(bill, key, val)
@@ -182,7 +215,7 @@ def update_sales_bill(bill_id: int, data: SalesBillCreate, db: Session = Depends
         item = SalesBillItem(**i_data, bill_id=bill.bill_id)
         db.add(item)
         if item.line_type == 'Medicine':
-            post_stock_ledger(db, item.medicine_id, item.batch_id, txn_type="SALE", qty=item.qty, ref_type="SalesBill", ref_id=bill.bill_id, ref_number=bill.bill_number, created_by=1)
+            post_stock_ledger(db, item.medicine_id, item.batch_id, txn_type="SALE", qty=item.qty, ref_type="SalesBill", ref_id=bill.bill_id, ref_number=bill.bill_number, created_by=_valid_created_by(db))
 
     db.commit()
     db.refresh(bill)

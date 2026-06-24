@@ -49,6 +49,7 @@ class MedicineBatch(Base):
     opening_qty    = Column(Numeric(10,2), default=0)
     current_qty    = Column(Numeric(10,2), default=0)
     source         = Column(String(20), default='Purchase')
+    is_active      = Column(Boolean, default=True)               # soft-delete flag
     created_at     = Column(DateTime, default=func.now())
 
     medicine = relationship("Medicine", back_populates="batches")

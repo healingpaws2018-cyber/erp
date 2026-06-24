@@ -43,6 +43,7 @@ backend/scratch/
 *.sql
 !database/*.sql
 !backend/migrations/*.sql
+*.dump
 import bcrypt.py
 import secrets.py
 

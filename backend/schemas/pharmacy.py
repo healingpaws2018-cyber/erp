@@ -112,7 +112,9 @@ class BatchOut(BatchCreate):
 class StockLedgerOut(BaseModel):
     ledger_id: int
     medicine_id: int
+    medicine_name: Optional[str] = None
     batch_id: int
+    batch_no: Optional[str] = None
     txn_date: date
     txn_type: str
     qty_in: Decimal

@@ -294,7 +294,7 @@ export default function PrescriptionPrint({ consultation, rxData, pet, owner, sp
               Clinical Findings
             </div>
             {[
-              { label: 'TEMP', value: consultation?.temp_celsius ? `${consultation.temp_celsius} °C` : '' },
+              { label: 'TEMP', value: consultation?.temp_fahrenheit ? `${consultation.temp_fahrenheit} °F` : (consultation?.temp_celsius ? `${((parseFloat(consultation.temp_celsius) * 9/5) + 32).toFixed(1)} °F` : '') },
               { label: 'WT', value: consultation?.weight_kg ? `${consultation.weight_kg} kg` : '' },
               { label: 'HR', value: consultation?.heart_rate ? `${consultation.heart_rate} bpm` : '' },
               { label: 'RR', value: consultation?.resp_rate ? String(consultation.resp_rate) : '' },
@@ -324,6 +324,19 @@ export default function PrescriptionPrint({ consultation, rxData, pet, owner, sp
             <div style={{ fontFamily: 'Georgia, serif', fontSize: '30px', fontStyle: 'italic', color: '#1e3a5f', fontWeight: '700', marginBottom: '10px', lineHeight: 1 }}>
               ℞
             </div>
+
+            {/* Chief Complaint — each newline becomes its own bullet line */}
+            {consultation?.chief_complaint && (
+              <div style={{ fontSize: '11px', marginBottom: '10px', padding: '6px 10px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '4px' }}>
+                <strong style={{ color: '#92400e', display: 'block', marginBottom: '3px' }}>Chief Complaint:</strong>
+                {consultation.chief_complaint.split('\n').map(l => l.trim()).filter(Boolean).map((line, idx) => (
+                  <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: '5px', color: '#78350f', marginTop: idx > 0 ? '3px' : 0 }}>
+                    <span style={{ flexShrink: 0, marginTop: '1px' }}>•</span>
+                    <span>{line}</span>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {(!rxData?.items || rxData.items.length === 0) ? (
               <div style={{ color: '#94a3b8', fontSize: '11px', fontStyle: 'italic' }}>No medicines prescribed.</div>

@@ -42,6 +42,7 @@ class SalesBillBase(BaseModel):
     agent_id: Optional[int] = None
     payment_mode: str = "Cash"
     notes: Optional[str] = None
+    with_gst: bool = True       # False = tax-exempt billing, use sale price only
 
 class SalesBillCreate(SalesBillBase):
     items: List[SalesBillItemCreate]

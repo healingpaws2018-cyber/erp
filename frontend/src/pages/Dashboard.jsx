@@ -24,6 +24,7 @@ export default function Dashboard() {
   const navigate = useNavigate()
   const [counts, setCounts] = useState({ owners: 0, pets: 0, doctors: 0, staff: 0 })
   const [loading, setLoading] = useState(true)
+  const [clinicName, setClinicName] = useState('')
   const user = JSON.parse(localStorage.getItem('user') || '{}')
   const today = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
 
@@ -47,6 +48,9 @@ export default function Dashboard() {
       }
     }
     fetchCounts()
+    api.get('/clinic/setup')
+      .then(r => setClinicName(r.data?.clinic_name || ''))
+      .catch(() => {})
   }, [])
 
   return (
@@ -55,8 +59,8 @@ export default function Dashboard() {
       <div className="bg-gradient-to-r from-primary-600 to-primary-700 rounded-2xl p-6 text-white shadow-lg">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-primary-200 text-sm font-medium">Good day!</p>
-            <h2 className="text-2xl font-bold mt-0.5">Welcome back, {user.full_name?.split(' ')[0] || 'Admin'} 👋</h2>
+            <h1 className="text-3xl font-black tracking-tight">{clinicName || user.company_name || 'Animal Clinic'}</h1>
+            <p className="text-primary-100 text-base font-medium mt-1">Welcome back, {user.full_name?.split(' ')[0] || 'Admin'} 👋</p>
             <p className="text-primary-200 text-sm mt-1">{today}</p>
           </div>
           <div className="text-6xl opacity-20">🐾</div>

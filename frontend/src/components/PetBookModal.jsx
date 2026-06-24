@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react'
 import { toast } from 'react-hot-toast'
-import { X, Calendar, Activity, AlertTriangle, FileText, Plus, Filter, Heart, User, Shield, Tag } from 'lucide-react'
+import { X, Calendar, Activity, AlertTriangle, FileText, Plus, Filter, Heart, User, Shield, Tag, Share2 } from 'lucide-react'
 import api from '../api'
+import PetBookPrint from './PetBookPrint'
 
 export default function PetBookModal({ isOpen, onClose, petId }) {
   const [data, setData] = useState(null)
+  const [clinic, setClinic] = useState(null)
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('timeline')
+  const [showExport, setShowExport] = useState(false)
   
   // Timeline filters
   const [filters, setFilters] = useState({
@@ -40,26 +43,30 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
   useEffect(() => {
     if (isOpen && petId) {
       loadBook()
+      api.get('/clinic/setup').then(r => setClinic(r.data)).catch(() => {})
     }
   }, [isOpen, petId])
 
   if (!isOpen) return null
+
+  // Derived display helpers (real data only — no placeholders)
+  const pet = data?.pet
+  const ageStr = pet && (pet.age_years != null || pet.age_months != null)
+    ? [pet.age_years ? `${pet.age_years}y` : null, pet.age_months ? `${pet.age_months}m` : null].filter(Boolean).join(' ') || '0m'
+    : 'Age not recorded'
+  const speciesBreed = pet ? [pet.species_name, pet.breed_name].filter(Boolean).join(' • ') : ''
 
   const handleAddAllergy = async (e) => {
     e.preventDefault()
     if (!newAllergy.allergen) return toast.error('Allergen name is required')
     setSavingAllergy(true)
     try {
-      // In a full implementation, this could hit a dedicated POST /pets/{pet_id}/allergies endpoint
-      // Here we simulate or update via custom route if needed, or just append locally for demo
+      const { data: saved } = await api.post(`/pets/${petId}/allergies`, newAllergy)
       toast.success('Allergy recorded successfully!')
-      setData(prev => ({
-        ...prev,
-        allergies: [{ allergy_id: Date.now(), ...newAllergy, discovered_date: new Date().toISOString().split('T')[0] }, ...prev.allergies]
-      }))
+      setData(prev => ({ ...prev, allergies: [saved, ...prev.allergies] }))
       setNewAllergy({ allergen: '', reaction_type: '', severity: 'Moderate', notes: '' })
     } catch (err) {
-      toast.error('Failed to add allergy')
+      toast.error(err?.response?.data?.detail || 'Failed to add allergy')
     } finally {
       setSavingAllergy(false)
     }
@@ -70,15 +77,23 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
     if (!newVital.weight_kg) return toast.error('Weight is required')
     setSavingVital(true)
     try {
+      const payload = {
+        weight_kg: newVital.weight_kg ? parseFloat(newVital.weight_kg) : null,
+        temp_celsius: newVital.temp_celsius ? parseFloat(newVital.temp_celsius) : null,
+        heart_rate: newVital.heart_rate ? parseInt(newVital.heart_rate) : null,
+        resp_rate: newVital.resp_rate ? parseInt(newVital.resp_rate) : null,
+        body_condition_score: newVital.body_condition_score ? parseInt(newVital.body_condition_score) : null,
+      }
+      const { data: saved } = await api.post(`/pets/${petId}/vitals`, payload)
       toast.success('Vitals logged successfully!')
       setData(prev => ({
         ...prev,
-        vitals: [{ vital_id: Date.now(), recorded_at: new Date().toISOString().replace('T', ' ').substring(0, 16), ...newVital }, ...prev.vitals],
-        pet: { ...prev.pet, weight_kg: parseFloat(newVital.weight_kg) }
+        vitals: [saved, ...prev.vitals],
+        pet: { ...prev.pet, weight_kg: saved.weight_kg ?? prev.pet.weight_kg }
       }))
       setNewVital({ weight_kg: '', temp_celsius: '', heart_rate: '', resp_rate: '', body_condition_score: 5 })
     } catch (err) {
-      toast.error('Failed to add vitals')
+      toast.error(err?.response?.data?.detail || 'Failed to add vitals')
     } finally {
       setSavingVital(false)
     }
@@ -108,9 +123,19 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
               <p className="text-xs text-slate-500">Comprehensive longitudinal clinical & medical history</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors">
-            <X size={20} />
-          </button>
+          <div className="flex items-center gap-2">
+            {data && (
+              <button
+                onClick={() => setShowExport(true)}
+                className="flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm"
+              >
+                <Share2 size={16} /> Export / Share
+              </button>
+            )}
+            <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors">
+              <X size={20} />
+            </button>
+          </div>
         </div>
 
         {loading ? (
@@ -133,11 +158,13 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
                 <div>
                   <div className="flex items-center gap-3 flex-wrap">
                     <h1 className="text-3xl font-extrabold tracking-tight">{data.pet.name}</h1>
+                    {speciesBreed && (
+                      <span className="bg-white/20 backdrop-blur-md text-white font-semibold text-xs px-3 py-1 rounded-full border border-white/10">
+                        {speciesBreed}
+                      </span>
+                    )}
                     <span className="bg-white/20 backdrop-blur-md text-white font-semibold text-xs px-3 py-1 rounded-full border border-white/10">
-                      {data.pet.species_name} • {data.pet.breed_name}
-                    </span>
-                    <span className="bg-white/20 backdrop-blur-md text-white font-semibold text-xs px-3 py-1 rounded-full border border-white/10">
-                      {data.pet.gender} • {data.pet.age_years}y {data.pet.age_months}m
+                      {[data.pet.gender, ageStr].filter(Boolean).join(' • ')}
                     </span>
                     {data.summary.is_spayed_neutered && (
                       <span className="bg-green-500/20 text-green-200 font-bold text-xs px-3 py-1 rounded-full border border-green-500/30 backdrop-blur-md flex items-center gap-1">
@@ -147,20 +174,16 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
                   </div>
 
                   <div className="flex items-center gap-6 mt-3 text-xs text-primary-100 flex-wrap">
-                    <div className="flex items-center gap-1.5">
-                      <User size={14} className="text-primary-300" />
-                      <span>Owner: <strong className="text-white">{data.pet.owner_name}</strong> ({data.pet.owner_phone})</span>
-                    </div>
+                    {data.pet.owner_name && (
+                      <div className="flex items-center gap-1.5">
+                        <User size={14} className="text-primary-300" />
+                        <span>Owner: <strong className="text-white">{data.pet.owner_name}</strong>{data.pet.owner_phone ? ` (${data.pet.owner_phone})` : ''}</span>
+                      </div>
+                    )}
                     {data.summary.microchip_no && (
                       <div className="flex items-center gap-1.5">
                         <Tag size={14} className="text-primary-300" />
                         <span>Microchip: <strong className="text-white">{data.summary.microchip_no}</strong></span>
-                      </div>
-                    )}
-                    {data.summary.insurance_provider && (
-                      <div className="flex items-center gap-1.5">
-                        <Shield size={14} className="text-primary-300" />
-                        <span>Insurance: <strong className="text-white">{data.summary.insurance_provider}</strong> ({data.summary.insurance_policy_no})</span>
                       </div>
                     )}
                   </div>
@@ -186,7 +209,7 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
                 
                 <div className="bg-white/10 backdrop-blur-md border border-white/10 rounded-xl px-4 py-2 flex items-center justify-between gap-4 text-xs">
                   <span className="text-primary-200">Current Weight:</span>
-                  <span className="text-white font-bold text-sm">{data.pet.weight_kg} kg</span>
+                  <span className="text-white font-bold text-sm">{data.pet.weight_kg != null ? `${data.pet.weight_kg} kg` : '—'}</span>
                 </div>
               </div>
             </div>
@@ -305,9 +328,51 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
                                 </span>
                               </div>
 
-                              <p className="text-slate-600 text-sm leading-relaxed bg-white p-4 rounded-xl border border-slate-200/40 shadow-inner font-normal">
-                                {item.summary_snippet}
-                              </p>
+                              {/* Structured consultation / prescription-note fields — one per line */}
+                              {item.details?.length > 0 && (
+                                <div className="bg-white p-4 rounded-xl border border-slate-200/40 shadow-inner flex flex-col gap-1.5">
+                                  {item.details.map((d, di) => (
+                                    <p key={di} className="text-slate-600 text-sm leading-relaxed whitespace-pre-line">
+                                      <span className="font-semibold text-slate-700">{d.label}:</span> {d.value}
+                                    </p>
+                                  ))}
+                                </div>
+                              )}
+
+                              {/* Prescribed medicines */}
+                              {item.medicines?.length > 0 && (
+                                <div className="bg-white p-4 rounded-xl border border-slate-200/40 shadow-inner flex flex-col gap-2">
+                                  <div className="text-[11px] font-bold text-purple-700 uppercase tracking-wider">Prescribed Medicines</div>
+                                  <div className="flex flex-col gap-2">
+                                    {item.medicines.map((m, mi) => {
+                                      const meta = [
+                                        m.dose,
+                                        m.frequency,
+                                        m.route,
+                                        m.duration_days ? `${m.duration_days} day${m.duration_days > 1 ? 's' : ''}` : null,
+                                        m.quantity != null ? `Qty: ${m.quantity}` : null,
+                                      ].filter(Boolean).join(' • ')
+                                      return (
+                                        <div key={mi} className="border-l-2 border-purple-200 pl-3">
+                                          <div className="text-sm font-semibold text-slate-800">
+                                            {m.medicine_name}
+                                            {m.strength ? <span className="text-slate-500 font-normal"> ({m.strength}{m.dosage_form ? `, ${m.dosage_form}` : ''})</span> : null}
+                                          </div>
+                                          {meta && <div className="text-xs text-slate-500">{meta}</div>}
+                                          {m.instructions && <div className="text-xs text-slate-500 italic">{m.instructions}</div>}
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Fallback for events with no structured detail (vaccine, lab, etc.) */}
+                              {!(item.details?.length > 0) && !(item.medicines?.length > 0) && (
+                                <p className="text-slate-600 text-sm leading-relaxed bg-white p-4 rounded-xl border border-slate-200/40 shadow-inner font-normal">
+                                  {item.summary_snippet}
+                                </p>
+                              )}
 
                               {item.doctor_id && (
                                 <div className="flex items-center gap-2 text-xs text-slate-500 pt-1">
@@ -378,6 +443,7 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
                                 <th className="py-3.5 px-6">Heart Rate</th>
                                 <th className="py-3.5 px-6">Resp Rate</th>
                                 <th className="py-3.5 px-6">BCS</th>
+                                <th className="py-3.5 px-6">Source</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100 text-sm text-slate-600">
@@ -389,10 +455,13 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
                                   <td className="py-4 px-6">{v.heart_rate ? `${v.heart_rate} bpm` : '—'}</td>
                                   <td className="py-4 px-6">{v.resp_rate ? `${v.resp_rate} bpm` : '—'}</td>
                                   <td className="py-4 px-6">
-                                    <span className={`px-2.5 py-1 rounded-lg font-bold text-xs ${v.body_condition_score === 5 ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-                                      {v.body_condition_score} / 9
-                                    </span>
+                                    {v.body_condition_score ? (
+                                      <span className={`px-2.5 py-1 rounded-lg font-bold text-xs ${v.body_condition_score === 5 ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                                        {v.body_condition_score} / 9
+                                      </span>
+                                    ) : '—'}
                                   </td>
+                                  <td className="py-4 px-6 text-xs text-slate-500">{v.source || '—'}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -529,6 +598,10 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
         ) : null}
 
       </div>
+
+      {showExport && data && (
+        <PetBookPrint data={data} clinic={clinic} onClose={() => setShowExport(false)} />
+      )}
     </div>
   )
 }

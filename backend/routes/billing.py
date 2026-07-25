@@ -1,4 +1,5 @@
 from decimal import Decimal
+from types import SimpleNamespace
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
@@ -16,6 +17,11 @@ from utils.gl_utils import create_gl_account, get_gl_by_code, get_current_fy
 from models.users import User
 
 router = APIRouter(prefix="/billing/sales", tags=["Billing"])
+
+# Stand-in for lines whose bill is "Without GST" (or whose medicine/procedure has no
+# GST rate configured on a Without-GST bill) — every tax field zeroed so
+# calculate_line_item() can run without needing a real GstRate row.
+_ZERO_GST_RATE = SimpleNamespace(gst_percent=0, cgst_pct=0, sgst_pct=0, igst_pct=0)
 
 
 def _post_sales_bill_to_gl(db: Session, bill: SalesBill, owner: PetOwner, processed_lines: list, totals: dict):
@@ -137,9 +143,13 @@ def confirm_sales_bill(data: SalesBillCreate, db: Session = Depends(get_db)):
             hsn_code = p.hsn.hsn_code if p.hsn else ""
             description = p.procedure_name
 
-        gst_rate = db.query(GstRate).filter(GstRate.gst_rate_id == gst_rate_id).first()
-        if not gst_rate: raise HTTPException(400, "GST Rate missing")
-            
+        if data.with_gst:
+            gst_rate = db.query(GstRate).filter(GstRate.gst_rate_id == gst_rate_id).first()
+            if not gst_rate:
+                raise HTTPException(400, f"GST rate not set for '{description}' — set an HSN/GST rate on it in Medicines/Procedures master before billing with GST, or switch this bill to Without GST.")
+        else:
+            gst_rate = _ZERO_GST_RATE
+
         calc = calculate_line_item(line.rate, line.qty, line.discount_pct, gst_rate, is_interstate)
 
         # Without-GST mode: zero out all tax fields, line total = taxable amount only
@@ -263,7 +273,13 @@ def update_sales_bill(bill_id: int, data: SalesBillCreate, db: Session = Depends
             gst_rate_id = p.gst_rate_id
             description, hsn, unit = p.procedure_name, (p.hsn.hsn_code if p.hsn else ""), ""
 
-        gst_rate = db.query(GstRate).filter(GstRate.gst_rate_id == gst_rate_id).first()
+        if data.with_gst:
+            gst_rate = db.query(GstRate).filter(GstRate.gst_rate_id == gst_rate_id).first()
+            if not gst_rate:
+                raise HTTPException(400, f"GST rate not set for '{description}' — set an HSN/GST rate on it in Medicines/Procedures master before billing with GST, or switch this bill to Without GST.")
+        else:
+            gst_rate = _ZERO_GST_RATE
+
         calc = calculate_line_item(line.rate, line.qty, line.discount_pct, gst_rate, is_interstate)
 
         # Without-GST mode: zero out all tax fields

@@ -1,8 +1,9 @@
+from calendar import monthrange
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from typing import List, Optional
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from database import get_db
@@ -13,6 +14,7 @@ from models.phase3 import PurchaseBill, PurchaseBillItem, Supplier
 from models.clinic import ClinicSetup
 from models.accounts import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem
 from sqlalchemy import func
+from utils.gl_utils import get_current_fy
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
@@ -913,4 +915,95 @@ def get_creditor_outstanding(
             ]
         response.append(entry)
     return {"creditor_outstanding": response}
+
+
+# ── SALES vs PURCHASES ANALYTICS ─────────────────────────────────
+#
+# Backs Dashboard.jsx's SalesPurchaseChart — "how much came in (Sales) vs went out
+# (Purchases)" viewed as a per-day bar (week/month windows) or per-month bar (year
+# window). Same Week/Month/Year windowing convention as DoctorWorkloadChart
+# (see routes/appointments.py analytics/doctor-workload) for a consistent dashboard UX.
+#   - "sales"     — SalesBill.net_payable, grouped by bill_date. All sales bills are
+#     created with status="Confirmed" (routes/billing.py confirm_sales_bill) — there's
+#     no Draft/Cancelled sales-bill state in this app (voiding a bill deletes the row
+#     via DELETE /billing/sales/{id}), so no status filter is needed here.
+#   - "purchases" — PurchaseBill.net_amount, grouped by bill_date. All purchase bills
+#     are created with status="Completed" (routes/pharmacy.py), same reasoning.
+
+@router.get("/analytics/sales-purchases")
+def sales_purchases_summary(
+    window: str = Query("week", pattern="^(week|month|year)$"),
+    ref_date: Optional[date] = Query(None, description="Anchor date for week/month windows. Ignored for window=year (uses current FY). Defaults to today."),
+    db: Session = Depends(get_db)
+):
+    anchor = ref_date or date.today()
+
+    if window == "week":
+        start = anchor - timedelta(days=anchor.weekday())  # Monday
+        end = start + timedelta(days=6)                     # Sunday
+        buckets = [start + timedelta(days=i) for i in range(7)]
+        bucket_label = lambda d: d.strftime("%a %d")
+        bucket_of = lambda d: d
+        range_label = f"{start.strftime('%d %b')} – {end.strftime('%d %b %Y')}"
+    elif window == "month":
+        start = anchor.replace(day=1)
+        last_day = monthrange(anchor.year, anchor.month)[1]
+        end = anchor.replace(day=last_day)
+        buckets = [start + timedelta(days=i) for i in range(last_day)]
+        bucket_label = lambda d: d.strftime("%d")
+        bucket_of = lambda d: d
+        range_label = anchor.strftime("%B %Y")
+    else:  # year -> current FY, bucketed by month (no list-all-financial-years endpoint
+        # exists yet — see get_current_fy's own docstring — so this always shows the
+        # current FY, same limitation as the other dashboard charts' year window)
+        fy = get_current_fy(db)
+        if not fy:
+            return {"window": window, "range_label": "No financial year configured", "total_sales": 0, "total_purchases": 0, "buckets": []}
+        start, end = fy.start_date, fy.end_date
+        range_label = f"FY {fy.fy_code}"
+        buckets = []
+        cur = start.replace(day=1)
+        while cur <= end:
+            buckets.append(cur)
+            cur = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)  # jump into next month, snap to day 1
+        bucket_label = lambda d: d.strftime("%b %Y")
+        bucket_of = lambda d: d.replace(day=1)
+
+    sales_rows = (
+        db.query(SalesBill.bill_date, func.sum(SalesBill.net_payable))
+        .filter(SalesBill.bill_date >= start, SalesBill.bill_date <= end)
+        .group_by(SalesBill.bill_date)
+        .all()
+    )
+    sales_totals = {}
+    for d, total in sales_rows:
+        key = bucket_of(d)
+        sales_totals[key] = sales_totals.get(key, 0) + float(total or 0)
+
+    purch_rows = (
+        db.query(PurchaseBill.bill_date, func.sum(PurchaseBill.net_amount))
+        .filter(PurchaseBill.bill_date >= start, PurchaseBill.bill_date <= end)
+        .group_by(PurchaseBill.bill_date)
+        .all()
+    )
+    purch_totals = {}
+    for d, total in purch_rows:
+        key = bucket_of(d)
+        purch_totals[key] = purch_totals.get(key, 0) + float(total or 0)
+
+    return {
+        "window": window,
+        "range_label": range_label,
+        "total_sales": round(sum(sales_totals.values()), 2),
+        "total_purchases": round(sum(purch_totals.values()), 2),
+        "buckets": [
+            {
+                "label": bucket_label(b),
+                "date": str(b),
+                "sales": round(sales_totals.get(b, 0), 2),
+                "purchases": round(purch_totals.get(b, 0), 2),
+            }
+            for b in buckets
+        ],
+    }
 

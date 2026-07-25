@@ -4,6 +4,7 @@ import { Users, PawPrint, Stethoscope, UserCheck, TrendingUp, Calendar } from 'l
 import api from '../api'
 import SpeciesVisitChart from '../components/SpeciesVisitChart'
 import DoctorWorkloadChart from '../components/DoctorWorkloadChart'
+import SalesPurchaseChart from '../components/SalesPurchaseChart'
 
 function StatCard({ icon: Icon, label, value, color, sub, onClick }) {
   return (
@@ -112,6 +113,9 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+
+      {/* Sales vs Purchases */}
+      <SalesPurchaseChart />
 
       {/* Species Visit Analytics */}
       <SpeciesVisitChart />

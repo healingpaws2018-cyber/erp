@@ -65,14 +65,22 @@ export default function Procedures() {
   const handleSubmit = async (e) => {
     e.preventDefault()
     try {
+      const payload = {
+        ...formData,
+        hsn_id: formData.hsn_id ? Number(formData.hsn_id) : null,
+        gst_rate_id: formData.gst_rate_id ? Number(formData.gst_rate_id) : null,
+        fee: Number(formData.fee) || 0
+      }
       if (editingProc) {
-        await api.put(`/services/procedures/${editingProc.procedure_id}`, formData)
+        await api.put(`/services/procedures/${editingProc.procedure_id}`, payload)
       } else {
-        await api.post('/services/procedures', formData)
+        await api.post('/services/procedures', payload)
       }
       setIsModalOpen(false)
       fetchProcedures()
-    } catch (err) { alert("Save failed") }
+    } catch (err) {
+      alert(err?.response?.data?.detail ? JSON.stringify(err.response.data.detail) : "Save failed")
+    }
   }
 
   return (

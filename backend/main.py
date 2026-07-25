@@ -177,6 +177,56 @@ try:
                         print(f"🔁 Migrated fin_year 2526→2627 in doc_sequences for '{c_db_name}'.")
                     except Exception:
                         c_conn.rollback()
+
+                    # Auto-seed system GL accounts (idempotent — ON CONFLICT DO NOTHING).
+                    # Purchase Bill / Sales Bill / GST posting code hard-requires these by
+                    # code (PURCH-MED, SALES-MED, GST-*-PAY/IN, CASH, BANK-001, DEB-CTRL,
+                    # CRED-CTRL, ADV-SUP, ADV-CUST) via get_gl_by_code()/_gl_or_raise(), but
+                    # nothing else ever created them — create_company() only calls
+                    # init_sequences_for_db(). Without this, the first Purchase/Sales Bill
+                    # in a company DB 500s with "GL account 'PURCH-MED' not found".
+                    # See backend/run_seed_gl_master.py for the standalone one-off version.
+                    try:
+                        c_conn.execute(text("""
+                            INSERT INTO gl_master (gl_code, gl_name, group_name, sub_group, is_active, is_system, balance_type) VALUES
+                              ('CASH',          'Petty Cash',                 'Assets',      'Cash & Bank', TRUE, TRUE, 'DR'),
+                              ('BANK-001',      'Main Bank Account',           'Assets',      'Cash & Bank', TRUE, TRUE, 'DR'),
+                              ('DEB-CTRL',      'Debtors Control',             'Assets',      'Debtors',     TRUE, TRUE, 'DR'),
+                              ('CRED-CTRL',     'Creditors Control',           'Liabilities', 'Creditors',   TRUE, TRUE, 'CR'),
+                              ('GST-CGST-PAY',  'CGST Payable',                'Liabilities', 'GST Payable', TRUE, TRUE, 'CR'),
+                              ('GST-SGST-PAY',  'SGST Payable',                'Liabilities', 'GST Payable', TRUE, TRUE, 'CR'),
+                              ('GST-IGST-PAY',  'IGST Payable',                'Liabilities', 'GST Payable', TRUE, TRUE, 'CR'),
+                              ('GST-CGST-IN',   'CGST Input Credit',           'Assets',      'GST Input',   TRUE, TRUE, 'DR'),
+                              ('GST-SGST-IN',   'SGST Input Credit',           'Assets',      'GST Input',   TRUE, TRUE, 'DR'),
+                              ('GST-IGST-IN',   'IGST Input Credit',           'Assets',      'GST Input',   TRUE, TRUE, 'DR'),
+                              ('SALES-VET',     'Veterinary Services Income',  'Income',      'Sales',       TRUE, TRUE, 'CR'),
+                              ('SALES-MED',     'Medicine Sales Income',       'Income',      'Sales',       TRUE, TRUE, 'CR'),
+                              ('SALES-RET',     'Sales Returns',               'Income',      'Sales',       TRUE, TRUE, 'DR'),
+                              ('PURCH-MED',     'Medicine Purchases',          'Expense',     'Purchases',   TRUE, TRUE, 'DR'),
+                              ('PURCH-RET',     'Purchase Returns',            'Expense',     'Purchases',   TRUE, TRUE, 'CR'),
+                              ('ADV-SUP',       'Advance to Suppliers',        'Liabilities', 'Advance',     TRUE, TRUE, 'DR'),
+                              ('ADV-CUST',      'Advance from Customers',      'Liabilities', 'Advance',     TRUE, TRUE, 'CR')
+                            ON CONFLICT (gl_code) DO NOTHING
+                        """))
+                        # Backfill in case some rows already exist from an earlier partial
+                        # run (e.g. inserted without is_active/is_system set) — a plain
+                        # INSERT without listing every column leaves those NULL, and
+                        # Ledger.jsx filters is_active = TRUE by default.
+                        c_conn.execute(text("""
+                            UPDATE gl_master SET is_active = TRUE, is_system = TRUE
+                            WHERE gl_code IN (
+                                'CASH','BANK-001','DEB-CTRL','CRED-CTRL',
+                                'GST-CGST-PAY','GST-SGST-PAY','GST-IGST-PAY',
+                                'GST-CGST-IN','GST-SGST-IN','GST-IGST-IN',
+                                'SALES-VET','SALES-MED','SALES-RET',
+                                'PURCH-MED','PURCH-RET','ADV-SUP','ADV-CUST'
+                            ) AND (is_active IS DISTINCT FROM TRUE OR is_system IS DISTINCT FROM TRUE)
+                        """))
+                        c_conn.commit()
+                        print(f"➕ Ensured 17 system GL accounts exist in '{c_db_name}'.")
+                    except Exception as e:
+                        c_conn.rollback()
+                        print(f"⚠️ GL master seed check failed for '{c_db_name}': {e}")
                 print(f"✅ Company DB '{c_db_name}' sequences and migrations checked successfully.")
             except Exception as sub_e:
                 print(f"⚠️ Could not init sequences/migrations for '{c_db_name}': {sub_e}")

@@ -90,11 +90,27 @@ export default function Appointments() {
   }
 
   const handleUndoCheckin = async (appt_id) => {
-    try { 
-      await api.put(`/appointments/${appt_id}/undo-checkin`); 
-      toast.success('Check-in reversed!'); 
-      load() 
+    try {
+      await api.put(`/appointments/${appt_id}/undo-checkin`);
+      toast.success('Check-in reversed!');
+      load()
     } catch (err) { toast.error(err.response?.data?.detail || 'Error') }
+  }
+
+  // Manual escape hatch: normally the appointment auto-completes when its linked
+  // Consultation is closed, but if the consultation was started from
+  // Consultations → New Consultation (instead of this row's "Open Consultation"
+  // button) it's never linked back, so it can get stuck on Arrived/In-Consultation
+  // forever with no other way to clear it.
+  const handleComplete = async (appt_id) => {
+    try {
+      await api.put(`/appointments/${appt_id}/complete`)
+      toast.success('Marked Completed!')
+      load()
+    } catch (err) {
+      const detail = err.response?.data?.detail
+      toast.error(typeof detail === 'string' ? detail : 'Error')
+    }
   }
 
   const handleEdit = (appt) => {
@@ -198,6 +214,13 @@ export default function Appointments() {
               <button onClick={() => navigate(`/consultations/${row.consult_id}`)}
                 className="p-1.5 text-slate-400 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition-colors" title="View Consultation">
                 <CalendarDays size={14} />
+              </button>
+            )}
+            {['Arrived', 'In-Consultation'].includes(row.status) && (
+              <button onClick={() => handleComplete(row.appt_id)}
+                className="p-1.5 text-slate-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                title="Mark Completed (use if the consultation was started independently and never auto-completed this)">
+                <CheckCircle size={14} />
               </button>
             )}
             {['Scheduled', 'Arrived'].includes(row.status) && (

@@ -141,6 +141,28 @@ def undo_checkin(appt_id: int, db: Session = Depends(get_db)):
     return a
 
 
+@router.put("/{appt_id}/complete", response_model=AppointmentOut)
+def complete_appointment(appt_id: int, db: Session = Depends(get_db)):
+    """Manually mark an appointment as Completed.
+
+    Normally an appointment auto-transitions Arrived -> In-Consultation -> Completed
+    via the linked Consultation (see routes/consultations.py create_consultation /
+    close_consultation). But if the consultation was started from Consultations ->
+    New Consultation instead of the appointment's "Open Consultation" button, it's
+    never linked back (appointment_id stays null on the consultation), so the
+    appointment has no way to auto-complete and gets stuck on Arrived/In-Consultation
+    forever. This gives staff a manual way out of that state.
+    """
+    a = db.query(Appointment).filter(Appointment.appt_id == appt_id).first()
+    if not a:
+        raise HTTPException(404, "Appointment not found")
+    if a.status not in ("Arrived", "In-Consultation"):
+        raise HTTPException(400, f"Cannot mark an appointment with status '{a.status}' as Completed")
+    a.status = "Completed"
+    db.commit(); db.refresh(a)
+    return a
+
+
 @router.put("/{appt_id}/cancel")
 def cancel_appointment(appt_id: int, db: Session = Depends(get_db)):
     a = db.query(Appointment).filter(Appointment.appt_id == appt_id).first()

@@ -6,13 +6,36 @@ from datetime import datetime
 from decimal import Decimal
 
 from database import get_db
-from models.accounts import BankArrival
+from models.accounts import BankArrival, GLPosting
 from schemas.accounts import (
     BankArrivalCreate, BankArrivalUpdate, BankArrivalOut
 )
 from utils.doc_sequence import get_next_doc_no, format_fy
 
 router = APIRouter(prefix="/accounts/bank-arrivals", tags=["Accounts"])
+
+
+def _post_bank_arrival_to_gl(db: Session, ba: BankArrival, data: BankArrivalCreate):
+    """
+    A Bank Arrival records money that has physically arrived in the bank from a
+    party but hasn't yet been matched to specific bill(s) — semantically an
+    unallocated Receipt Voucher. DR gl_bank_id (money in) / CR gl_party_id (party
+    owes less), posted directly against the party's own GL account so the party's
+    outstanding balance is accurate the moment the money arrives, even before it's
+    matched to a bill.
+    """
+    if (data.amount or 0) <= 0:
+        return
+    common = dict(
+        fy_code=data.fy_code,
+        posting_date=data.voucher_date,
+        voucher_type="BankArrival",
+        voucher_no=data.voucher_no,
+        voucher_ref_id=ba.arrival_id,
+        narration=data.narration,
+    )
+    db.add(GLPosting(**common, gl_id=data.gl_bank_id, dr_amount=data.amount, cr_amount=0))
+    db.add(GLPosting(**common, gl_id=data.gl_party_id, dr_amount=0, cr_amount=data.amount))
 
 def _ensure_ba_sequence(db: Session, fy_code: str):
     db.execute(text("""
@@ -44,25 +67,36 @@ def create_bank_arrival(data: BankArrivalCreate, db: Session = Depends(get_db)):
         _ensure_ba_sequence(db, data.fy_code)
         data.voucher_no = get_next_doc_no(db, "BA")
         
-    ba = BankArrival(
-        fy_code=data.fy_code,
-        voucher_no=data.voucher_no,
-        voucher_date=data.voucher_date,
-        gl_party_id=data.gl_party_id,
-        party_name=data.party_name,
-        gl_bank_id=data.gl_bank_id,
-        bank_name=data.bank_name,
-        amount=data.amount,
-        entered_amount=Decimal("0"),
-        ref_doc_no=data.ref_doc_no,
-        ref_doc_date=data.ref_doc_date,
-        narration=data.narration,
-        status="Open"
-    )
-    db.add(ba)
-    db.commit()
-    db.refresh(ba)
-    return ba
+    try:
+        ba = BankArrival(
+            fy_code=data.fy_code,
+            voucher_no=data.voucher_no,
+            voucher_date=data.voucher_date,
+            gl_party_id=data.gl_party_id,
+            party_name=data.party_name,
+            gl_bank_id=data.gl_bank_id,
+            bank_name=data.bank_name,
+            amount=data.amount,
+            entered_amount=Decimal("0"),
+            ref_doc_no=data.ref_doc_no,
+            ref_doc_date=data.ref_doc_date,
+            narration=data.narration,
+            status="Open"
+        )
+        db.add(ba)
+        db.flush()
+
+        _post_bank_arrival_to_gl(db, ba, data)
+
+        db.commit()
+        db.refresh(ba)
+        return ba
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Failed to create bank arrival: {e}")
 
 @router.get("/", response_model=List[BankArrivalOut])
 def list_bank_arrivals(
@@ -114,7 +148,24 @@ def delete_bank_arrival(arrival_id: int, db: Session = Depends(get_db)):
     ba = db.query(BankArrival).filter(BankArrival.arrival_id == arrival_id).first()
     if not ba:
         raise HTTPException(status_code=404, detail="Bank Arrival not found")
-        
-    ba.status = "Cancelled"
-    db.commit()
-    return {"message": "Bank Arrival cancelled successfully"}
+
+    if (ba.entered_amount or Decimal("0")) > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot cancel: this bank arrival has already been matched against one or more receipt vouchers. Cancel those first."
+        )
+
+    try:
+        ba.status = "Cancelled"
+
+        # Reverse GL Postings
+        db.query(GLPosting).filter(
+            GLPosting.voucher_type == 'BankArrival',
+            GLPosting.voucher_ref_id == arrival_id
+        ).delete()
+
+        db.commit()
+        return {"message": "Bank Arrival cancelled successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Failed to cancel bank arrival: {e}")

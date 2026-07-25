@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { toast } from 'react-hot-toast'
 import { Eye, EyeOff, Lock, User, Building2, Database, ChevronRight, CheckCircle2 } from 'lucide-react'
 import api from '../api'
+import { fetchAndStorePermissions } from '../constants/permissions'
 
 export default function Login() {
   const navigate = useNavigate()
@@ -56,7 +57,14 @@ export default function Login() {
         db_name:      res.data.db_name,
         current_fy:   res.data.current_fy
       }))
-      
+
+      // Fetch this user's module View/Create/Edit/Delete/Export permissions and cache them
+      // for Sidebar.jsx (nav filtering) and App.jsx (route guard) to read synchronously on
+      // every render — must happen after the token is stored above since api.js's request
+      // interceptor reads it from localStorage. Never blocks/fails login (see
+      // fetchAndStorePermissions's docstring).
+      await fetchAndStorePermissions(api, res.data.user_id)
+
       toast.success(`Welcome back, ${res.data.full_name}!`)
       
       // Route straight to your application main dashboard layout

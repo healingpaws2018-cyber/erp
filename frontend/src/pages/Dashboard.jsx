@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Users, PawPrint, Stethoscope, UserCheck, TrendingUp, Calendar } from 'lucide-react'
 import api from '../api'
+import SpeciesVisitChart from '../components/SpeciesVisitChart'
+import DoctorWorkloadChart from '../components/DoctorWorkloadChart'
 
 function StatCard({ icon: Icon, label, value, color, sub, onClick }) {
   return (
@@ -53,17 +55,39 @@ export default function Dashboard() {
       .catch(() => {})
   }, [])
 
+  const quickActions = [
+    { label: 'Add Pet Owner',  href: '/owners',  icon: '👤', color: 'bg-blue-50 hover:bg-blue-100 text-blue-700' },
+    { label: 'Register Pet',   href: '/pets',    icon: '🐾', color: 'bg-green-50 hover:bg-green-100 text-green-700' },
+    { label: 'Add Doctor',     href: '/doctors', icon: '👨‍⚕️', color: 'bg-purple-50 hover:bg-purple-100 text-purple-700' },
+    { label: 'Clinic Setup',   href: '/clinic-setup', icon: '🏥', color: 'bg-orange-50 hover:bg-orange-100 text-orange-700' },
+    { label: 'Manage Masters', href: '/masters', icon: '📋', color: 'bg-teal-50 hover:bg-teal-100 text-teal-700' },
+    { label: 'Pet Health Book', href: '/pets',    icon: '📖', color: 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700' },
+  ]
+
   return (
     <div className="space-y-6">
-      {/* Welcome Banner */}
-      <div className="bg-gradient-to-r from-primary-600 to-primary-700 rounded-2xl p-6 text-white shadow-lg">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-black tracking-tight">{clinicName || user.company_name || 'Animal Clinic'}</h1>
-            <p className="text-primary-100 text-base font-medium mt-1">Welcome back, {user.full_name?.split(' ')[0] || 'Admin'} 👋</p>
-            <p className="text-primary-200 text-sm mt-1">{today}</p>
+      {/* Welcome Banner (minimal) + Quick Actions filling the rest */}
+      <div className="flex flex-col lg:flex-row gap-4">
+        <div className="lg:w-1/4 shrink-0 bg-gradient-to-r from-primary-600 to-primary-700 rounded-2xl px-4 py-3 text-white shadow-lg flex flex-col justify-center">
+          <h1 className="text-base font-black tracking-tight truncate">{clinicName || user.company_name || 'Animal Clinic'}</h1>
+          <p className="text-primary-100 text-xs font-medium mt-0.5 truncate">Welcome back, {user.full_name?.split(' ')[0] || 'Admin'} 👋</p>
+          <p className="text-primary-200 text-[11px] mt-0.5">{today}</p>
+        </div>
+
+        <div className="flex-1 card !p-3">
+          <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2 px-1">Quick Actions</h3>
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+            {quickActions.map(({ label, href, icon, color }) => (
+              <a
+                key={label}
+                href={href}
+                className={`flex flex-col items-center justify-center gap-1 p-2 rounded-lg text-center transition-all duration-150 font-medium ${color}`}
+              >
+                <span className="text-lg leading-none">{icon}</span>
+                <span className="text-[10px] leading-tight">{label}</span>
+              </a>
+            ))}
           </div>
-          <div className="text-6xl opacity-20">🐾</div>
         </div>
       </div>
 
@@ -89,29 +113,11 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* Quick Actions */}
-      <div>
-        <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">Quick Actions</h3>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-          {[
-            { label: 'Add Pet Owner',  href: '/owners',  icon: '👤', color: 'bg-blue-50 hover:bg-blue-100 text-blue-700' },
-            { label: 'Register Pet',   href: '/pets',    icon: '🐾', color: 'bg-green-50 hover:bg-green-100 text-green-700' },
-            { label: 'Add Doctor',     href: '/doctors', icon: '👨‍⚕️', color: 'bg-purple-50 hover:bg-purple-100 text-purple-700' },
-            { label: 'Clinic Setup',   href: '/clinic-setup', icon: '🏥', color: 'bg-orange-50 hover:bg-orange-100 text-orange-700' },
-            { label: 'Manage Masters', href: '/masters', icon: '📋', color: 'bg-teal-50 hover:bg-teal-100 text-teal-700' },
-            { label: 'Pet Health Book', href: '/pets',    icon: '📖', color: 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700' },
-          ].map(({ label, href, icon, color }) => (
-            <a
-              key={label}
-              href={href}
-              className={`flex items-center gap-3 p-4 rounded-xl border border-transparent transition-all duration-150 font-medium text-sm ${color}`}
-            >
-              <span className="text-xl">{icon}</span>
-              {label}
-            </a>
-          ))}
-        </div>
-      </div>
+      {/* Species Visit Analytics */}
+      <SpeciesVisitChart />
+
+      {/* Doctor Workload */}
+      <DoctorWorkloadChart />
     </div>
   )
 }

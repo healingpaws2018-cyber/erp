@@ -14,14 +14,73 @@ from models.phase3 import (
     PurchaseBill, PurchaseBillItem,
     PharmacyBill, PharmacyBillItem
 )
+from models.clinic import ClinicSetup
+from models.accounts import GLPosting
 from schemas.pharmacy import (
     PurchaseBillCreate, PurchaseBillOut,
     PharmacyBillCreate, PharmacyBillOut
 )
 from utils.doc_sequence import get_next_doc_no
 from utils.stock import post_stock_ledger
+from utils.gl_utils import create_gl_account, get_gl_by_code, get_current_fy
 
 router = APIRouter(prefix="/pharmacy", tags=["Pharmacy"])
+
+
+def _post_purchase_bill_to_gl(db: Session, bill: PurchaseBill, supplier: Supplier, total_taxable: Decimal, total_gst: Decimal, is_interstate: bool):
+    """Post a recorded Purchase Bill to the General Ledger.
+
+    DR Medicine Purchases (taxable portion) + DR GST input-credit accounts (the tax
+    paid, recoverable), CR the supplier's Creditor account for the full net amount
+    owed. Mirrors _post_sales_bill_to_gl in routes/billing.py — see that function's
+    docstring and chart_of_accounts.md project memory for the known-limitation notes
+    (skips silently if there's no active Financial Year; PurchaseBill has no CGST/SGST/
+    IGST split so an intrastate purchase's total_gst is assumed split evenly).
+    """
+    if not supplier:
+        return
+    fy = get_current_fy(db)
+    if not fy:
+        return
+    if total_taxable == 0 and total_gst == 0:
+        return
+
+    if not supplier.gl_account_id:
+        supplier.gl_account_id = create_gl_account("supplier", supplier.supplier_name, db)
+        db.flush()
+
+    def _gl_or_raise(code: str) -> int:
+        gl_id = get_gl_by_code(db, code)
+        if not gl_id:
+            raise HTTPException(500, f"GL account '{code}' not found — check Chart of Accounts setup (see migrations/seed_gl_master.sql)")
+        return gl_id
+
+    common = dict(fy_code=fy.fy_code, posting_date=bill.bill_date, voucher_type="PurchaseBill",
+                  voucher_no=bill.bill_no, voucher_ref_id=bill.bill_id, narration=f"Purchase Bill {bill.bill_no}")
+
+    if total_taxable > 0:
+        db.add(GLPosting(**common, gl_id=_gl_or_raise("PURCH-MED"), dr_amount=total_taxable, cr_amount=0))
+    if total_gst > 0:
+        if is_interstate:
+            db.add(GLPosting(**common, gl_id=_gl_or_raise("GST-IGST-IN"), dr_amount=total_gst, cr_amount=0))
+        else:
+            half = (total_gst / 2).quantize(Decimal("0.01"))
+            db.add(GLPosting(**common, gl_id=_gl_or_raise("GST-CGST-IN"), dr_amount=half, cr_amount=0))
+            db.add(GLPosting(**common, gl_id=_gl_or_raise("GST-SGST-IN"), dr_amount=(total_gst - half), cr_amount=0))
+    db.add(GLPosting(**common, gl_id=supplier.gl_account_id, dr_amount=0, cr_amount=total_taxable + total_gst))
+
+    bill.fy_code = fy.fy_code
+
+
+def _reverse_purchase_bill_gl(db: Session, bill_id: int):
+    db.query(GLPosting).filter(GLPosting.voucher_type == "PurchaseBill", GLPosting.voucher_ref_id == bill_id).delete()
+
+
+def _is_interstate_purchase(supplier: Optional[Supplier], clinic: Optional[ClinicSetup]) -> bool:
+    if supplier and supplier.state_code and clinic and clinic.state_code:
+        return supplier.state_code != clinic.state_code
+    return False
+
 
 # ── PURCHASE BILLING (INWARD STOCK) ──────────────────────────
 @router.post("/purchase", response_model=PurchaseBillOut)
@@ -41,9 +100,10 @@ def record_purchase(data: PurchaseBillCreate, db: Session = Depends(get_db)):
     )
     db.add(bill)
     db.flush() # Get bill_id
-    
+
     total_net = Decimal("0")
-    
+    total_gst = Decimal("0")
+
     # 2. Process Items
     for item in data.items:
         # Calculate totals
@@ -51,7 +111,8 @@ def record_purchase(data: PurchaseBillCreate, db: Session = Depends(get_db)):
         gst_amt = gross * (item.gst_pct / 100)
         net = gross + gst_amt
         total_net += net
-        
+        total_gst += gst_amt
+
         # Add Bill Item
         pb_item = PurchaseBillItem(
             bill_id=bill.bill_id,
@@ -108,10 +169,16 @@ def record_purchase(data: PurchaseBillCreate, db: Session = Depends(get_db)):
         )
 
     bill.net_amount = total_net
+
+    supplier = db.query(Supplier).filter(Supplier.supplier_id == data.supplier_id).first()
+    clinic = db.query(ClinicSetup).first()
+    is_interstate = _is_interstate_purchase(supplier, clinic)
+    _post_purchase_bill_to_gl(db, bill, supplier, total_net - total_gst, total_gst, is_interstate)
+
     db.commit()
     db.refresh(bill)
     return bill
-    
+
 
 @router.get("/purchase", response_model=List[PurchaseBillOut])
 def list_purchase_bills(
@@ -170,7 +237,8 @@ def delete_purchase_bill(bill_id: int, db: Session = Depends(get_db)):
             StockLedger.ref_type == "PUR",
             StockLedger.ref_id == bill_id
         ).delete()
-        
+
+    _reverse_purchase_bill_gl(db, bill_id)
     db.delete(bill)
     db.commit()
     return {"message": "Purchase bill deleted and stock reversed"}
@@ -207,10 +275,12 @@ def update_purchase_bill(bill_id: int, data: PurchaseBillCreate, db: Session = D
             StockLedger.ref_type == "PUR",
             StockLedger.ref_id == bill_id
         ).delete()
-    
+
+    _reverse_purchase_bill_gl(db, bill_id)
+
     # 2. Clear old items
     db.query(PurchaseBillItem).filter(PurchaseBillItem.bill_id == bill_id).delete()
-    
+
     # 3. Update header fields
     bill.supplier_id = data.supplier_id
     bill.supplier_invoice_no = data.supplier_invoice_no
@@ -220,12 +290,14 @@ def update_purchase_bill(bill_id: int, data: PurchaseBillCreate, db: Session = D
     
     # 4. Re-apply new items using post_stock_ledger
     total_net = Decimal("0")
+    total_gst = Decimal("0")
     for item in data.items:
         gross = item.purchase_price * (item.quantity + item.free_quantity)
         gst_amt = gross * (item.gst_pct / 100)
         net = gross + gst_amt
         total_net += net
-        
+        total_gst += gst_amt
+
         pb_item = PurchaseBillItem(
             bill_id=bill.bill_id,
             medicine_id=item.medicine_id,
@@ -276,6 +348,12 @@ def update_purchase_bill(bill_id: int, data: PurchaseBillCreate, db: Session = D
         )
 
     bill.net_amount = total_net
+
+    supplier = db.query(Supplier).filter(Supplier.supplier_id == bill.supplier_id).first()
+    clinic = db.query(ClinicSetup).first()
+    is_interstate = _is_interstate_purchase(supplier, clinic)
+    _post_purchase_bill_to_gl(db, bill, supplier, total_net - total_gst, total_gst, is_interstate)
+
     db.commit()
     db.refresh(bill)
     return bill

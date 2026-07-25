@@ -6,7 +6,7 @@ from typing import List, Optional
 from datetime import date, timedelta
 
 from database import get_db
-from models.stage3 import Vaccine
+from models.stage3 import Vaccine, Medicine
 from models.phase2 import VaccinationRecord, VaccinationReminder
 from models.people import Pet, PetOwner
 from models.doctors import Doctor
@@ -22,19 +22,80 @@ router = APIRouter(tags=["Vaccines & Vaccination"])
 
 # ── VACCINE MASTER ────────────────────────────────────────────
 
+def _attach_medicine_tax_fields(db: Session, vaccines):
+    """Vaccine has no hsn_id/gst_rate_id columns of its own — those live on the
+    linked Medicine. Pull them across as plain instance attributes (not persisted)
+    so VaccineOut can show/edit the billing item's current tax setup."""
+    medicine_ids = [v.medicine_id for v in vaccines if v.medicine_id]
+    meds = {}
+    if medicine_ids:
+        rows = db.query(Medicine.medicine_id, Medicine.hsn_id, Medicine.gst_rate_id)\
+                  .filter(Medicine.medicine_id.in_(medicine_ids)).all()
+        meds = {r.medicine_id: r for r in rows}
+    for v in vaccines:
+        m = meds.get(v.medicine_id)
+        v.hsn_id = m.hsn_id if m else None
+        v.gst_rate_id = m.gst_rate_id if m else None
+
+
+def _link_medicine(db: Session, vaccine_name: str, hsn_id, gst_rate_id, dosage, existing_medicine_id=None):
+    """Ensure this vaccine has a billable Medicine behind it.
+
+    - If `existing_medicine_id` points at a real Medicine, reuse it and sync its
+      HSN/GST from the vaccine form (so editing tax fields later stays in sync).
+    - Otherwise auto-create a new Medicine from the vaccine's own name/HSN/GST,
+      so a freshly-added vaccine is immediately billable in Sales & Purchase bills.
+    """
+    if existing_medicine_id:
+        med = db.query(Medicine).filter(Medicine.medicine_id == existing_medicine_id).first()
+        if med:
+            if hsn_id is not None:
+                med.hsn_id = hsn_id
+            if gst_rate_id is not None:
+                med.gst_rate_id = gst_rate_id
+            return med.medicine_id
+
+    med = Medicine(
+        medicine_code=get_next_doc_no(db, "MEDICINE"),
+        medicine_name=vaccine_name,
+        hsn_id=hsn_id,
+        gst_rate_id=gst_rate_id,
+        dosage_form="Vaccine",
+        strength=dosage,
+        reorder_level=0,
+        is_active=True,
+    )
+    db.add(med)
+    db.flush()  # get medicine_id
+    return med.medicine_id
+
+
 @router.get("/vaccines", response_model=List[VaccineOut])
 def list_vaccines(species_id: Optional[int] = Query(None), db: Session = Depends(get_db)):
     q = db.query(Vaccine).filter(Vaccine.is_active == True)
     if species_id:
         q = q.filter((Vaccine.species_id == species_id) | (Vaccine.species_id == None))
-    return q.order_by(Vaccine.vaccine_name).all()
+    vaccines = q.order_by(Vaccine.vaccine_name).all()
+    _attach_medicine_tax_fields(db, vaccines)
+    return vaccines
 
 
 @router.post("/vaccines", response_model=VaccineOut)
 def create_vaccine(data: VaccineCreate, db: Session = Depends(get_db)):
     code = get_next_doc_no(db, "VAC")
-    v = Vaccine(vaccine_code=code, **data.model_dump())
+    payload = data.model_dump()
+    hsn_id = payload.pop("hsn_id", None)
+    gst_rate_id = payload.pop("gst_rate_id", None)
+    manual_medicine_id = payload.pop("medicine_id", None)
+
+    medicine_id = _link_medicine(
+        db, data.vaccine_name, hsn_id, gst_rate_id, data.dosage,
+        existing_medicine_id=manual_medicine_id
+    )
+
+    v = Vaccine(vaccine_code=code, medicine_id=medicine_id, **payload)
     db.add(v); db.commit(); db.refresh(v)
+    _attach_medicine_tax_fields(db, [v])
     return v
 
 
@@ -43,9 +104,22 @@ def update_vaccine(vaccine_id: int, data: VaccineCreate, db: Session = Depends(g
     v = db.query(Vaccine).filter(Vaccine.vaccine_id == vaccine_id).first()
     if not v:
         raise HTTPException(404, "Vaccine not found")
-    for k, val in data.model_dump().items():
+
+    payload = data.model_dump()
+    hsn_id = payload.pop("hsn_id", None)
+    gst_rate_id = payload.pop("gst_rate_id", None)
+    manual_medicine_id = payload.pop("medicine_id", None)
+
+    medicine_id = _link_medicine(
+        db, data.vaccine_name, hsn_id, gst_rate_id, data.dosage,
+        existing_medicine_id=manual_medicine_id or v.medicine_id
+    )
+    payload["medicine_id"] = medicine_id
+
+    for k, val in payload.items():
         setattr(v, k, val)
     db.commit(); db.refresh(v)
+    _attach_medicine_tax_fields(db, [v])
     return v
 
 
@@ -62,6 +136,7 @@ def list_vaccination_records(pet_id: Optional[int] = Query(None), db: Session = 
         VaccinationRecord.owner_id,
         VaccinationRecord.vaccine_id,
         Vaccine.vaccine_name,
+        Vaccine.medicine_id,
         VaccinationRecord.doctor_id,
         Doctor.name.label("doctor_name"),
         VaccinationRecord.given_date,
@@ -93,6 +168,7 @@ def list_vaccination_records(pet_id: Optional[int] = Query(None), db: Session = 
             VaccinationRecord.owner_id,
             VaccinationRecord.vaccine_id,
             Vaccine.vaccine_name,
+            Vaccine.medicine_id,
             VaccinationRecord.doctor_id,
             Doctor.name.label("doctor_name"),
             VaccinationRecord.given_date,
@@ -119,6 +195,7 @@ def get_vaccination_record(record_id: int, db: Session = Depends(get_db)):
         VaccinationRecord.owner_id,
         VaccinationRecord.vaccine_id,
         Vaccine.vaccine_name,
+        Vaccine.medicine_id,
         VaccinationRecord.doctor_id,
         Doctor.name.label("doctor_name"),
         VaccinationRecord.given_date,
@@ -148,6 +225,7 @@ def get_vaccination_record(record_id: int, db: Session = Depends(get_db)):
             VaccinationRecord.owner_id,
             VaccinationRecord.vaccine_id,
             Vaccine.vaccine_name,
+            Vaccine.medicine_id,
             VaccinationRecord.doctor_id,
             Doctor.name.label("doctor_name"),
             VaccinationRecord.given_date,

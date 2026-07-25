@@ -13,6 +13,10 @@ class VaccineCreate(BaseModel):
     dosage: Optional[str] = None
     route: Optional[str] = None
     interval_days: Optional[int] = 0
+    medicine_id: Optional[int] = None   # optional: link to an ALREADY-EXISTING Medicine
+                                         # instead of auto-creating one (see hsn_id/gst_rate_id)
+    hsn_id: Optional[int] = None        # not stored on Vaccine itself — used to auto-create
+    gst_rate_id: Optional[int] = None   # (or keep in sync) the linked Medicine's tax fields
 
 
 class VaccineOut(BaseModel):
@@ -26,6 +30,9 @@ class VaccineOut(BaseModel):
     route: Optional[str]
     interval_days: int
     is_active: bool
+    medicine_id: Optional[int] = None
+    hsn_id: Optional[int] = None        # pulled from the linked Medicine, if any
+    gst_rate_id: Optional[int] = None   # pulled from the linked Medicine, if any
 
     class Config:
         from_attributes = True
@@ -64,6 +71,8 @@ class VaccinationRecordOut(BaseModel):
     pet_name: Optional[str] = None
     vaccine_name: Optional[str] = None
     doctor_name: Optional[str] = None
+    medicine_id: Optional[int] = None   # the vaccine's linked Medicine, if any — lets the
+                                         # Sales Bill screen pre-fill a billable line for this record
 
     class Config:
         from_attributes = True

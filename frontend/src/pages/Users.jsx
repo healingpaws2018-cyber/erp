@@ -1,11 +1,29 @@
 import { useEffect, useState } from 'react'
 import { toast } from 'react-hot-toast'
-import { Plus, Pencil, Trash2, RotateCcw, UserCog, KeyRound } from 'lucide-react'
+import { Plus, Pencil, Trash2, RotateCcw, UserCog, KeyRound, ShieldCheck } from 'lucide-react'
 import api from '../api'
 import Table from '../components/Table'
 import FormModal from '../components/FormModal'
 
 const ROLES = ['admin', 'doctor', 'receptionist', 'pharmacist', 'accountant', 'staff']
+
+// Same 7 module codes the backend already uses (routes/users.py PERMISSION_MODULES,
+// shared with routes/companies.py's Manage Roles screen) — friendly labels for display only.
+const PERMISSION_MODULES = [
+  { code: 'Clinic',   label: 'Clinic & Appointments' },
+  { code: 'Masters',  label: 'Masters Data' },
+  { code: 'Billing',  label: 'Billing & Sales' },
+  { code: 'Pharmacy', label: 'Pharmacy' },
+  { code: 'Inventory', label: 'Inventory' },
+  { code: 'Reports',  label: 'Reports & Accounts' },
+  { code: 'Users',    label: 'User Management' },
+]
+const PERM_FIELDS = [
+  { key: 'can_view',   label: 'View' },
+  { key: 'can_create', label: 'Create' },
+  { key: 'can_edit',   label: 'Edit' },
+  { key: 'can_delete', label: 'Delete' },
+]
 
 const EMPTY = {
   username: '', full_name: '', role: 'staff',
@@ -24,6 +42,11 @@ export default function Users() {
   const [newPwd, setNewPwd] = useState('')
   const [doctors, setDoctors] = useState([])
   const [staffList, setStaffList] = useState([])
+
+  const [permModal, setPermModal] = useState(null) // user object for the permissions modal
+  const [permData, setPermData] = useState([])      // [{module_code, can_view, can_create, can_edit, can_delete, can_export}]
+  const [permLoading, setPermLoading] = useState(false)
+  const [permSaving, setPermSaving] = useState(false)
 
   const load = () => api.get('/users', { params: { include_inactive: includeInactive } }).then(r => setData(r.data)).catch(() => {})
   useEffect(() => { load() }, [includeInactive])
@@ -84,6 +107,45 @@ export default function Users() {
     } catch { toast.error('Error resetting password') }
   }
 
+  // ── Module / CRUD Permissions ────────────────────────────────
+  // NOTE: this saves the permission set correctly, but nothing in the app enforces it yet
+  // (no backend route checks it, the sidebar doesn't filter on it) — same as the existing
+  // Company Profiles > Manage Roles screen. It's configuration for now, not a restriction.
+  // Permissions are scoped to the current company implicitly (the backend resolves the
+  // right company database from your login token the same way every other page does —
+  // no company_id needs to be sent from here).
+  const openPermissions = async (row) => {
+    setPermModal(row)
+    setPermLoading(true)
+    try {
+      const res = await api.get(`/users/${row.user_id}/permissions`)
+      setPermData(res.data.modules || [])
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Failed to load permissions')
+      setPermData(PERMISSION_MODULES.map(m => ({ module_code: m.code, can_view: false, can_create: false, can_edit: false, can_delete: false, can_export: false })))
+    } finally {
+      setPermLoading(false)
+    }
+  }
+
+  const togglePerm = (moduleCode, field) => {
+    setPermData(prev => prev.map(m => m.module_code === moduleCode ? { ...m, [field]: !m[field] } : m))
+  }
+
+  const savePermissions = async () => {
+    if (!permModal) return
+    setPermSaving(true)
+    try {
+      await api.put(`/users/${permModal.user_id}/permissions`, { modules: permData })
+      toast.success(`Permissions saved for ${permModal.full_name}`)
+      setPermModal(null)
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Failed to save permissions')
+    } finally {
+      setPermSaving(false)
+    }
+  }
+
   const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }))
   const roleColors = { admin: 'bg-red-100 text-red-700', doctor: 'bg-blue-100 text-blue-700', receptionist: 'bg-green-100 text-green-700', pharmacist: 'bg-purple-100 text-purple-700', accountant: 'bg-amber-100 text-amber-700', staff: 'bg-slate-100 text-slate-600' }
 
@@ -125,6 +187,7 @@ export default function Users() {
               {row.is_active ? (
                 <>
                   <button onClick={() => openEdit(row)} className="p-1.5 text-slate-400 hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-colors" title="Edit"><Pencil size={14} /></button>
+                  <button onClick={() => openPermissions(row)} className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Module Permissions"><ShieldCheck size={14} /></button>
                   <button onClick={() => { setPwdModal(row); setNewPwd('') }} className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors" title="Reset Password"><KeyRound size={14} /></button>
                   <button onClick={() => handleDeactivate(row)} className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Deactivate"><Trash2 size={14} /></button>
                 </>
@@ -186,6 +249,57 @@ export default function Users() {
           <div className="flex gap-3 justify-end pt-2 border-t border-slate-100">
             <button onClick={() => setPwdModal(null)} className="btn-secondary">Cancel</button>
             <button onClick={handlePasswordReset} className="btn-primary">Reset Password</button>
+          </div>
+        </div>
+      </FormModal>
+
+      {/* Module / CRUD Permissions Modal */}
+      <FormModal isOpen={!!permModal} onClose={() => setPermModal(null)} title={`Module Permissions — ${permModal?.full_name}`} size="lg">
+        <div className="space-y-4">
+          <p className="text-xs text-slate-400">
+            Choose which modules {permModal?.full_name} can access, and what they can do in each one.
+          </p>
+          {permLoading ? (
+            <p className="text-sm text-slate-400 py-8 text-center">Loading…</p>
+          ) : (
+            <div className="border border-slate-100 rounded-lg overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-100">
+                    <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-500 uppercase tracking-wide">Module</th>
+                    {PERM_FIELDS.map(f => (
+                      <th key={f.key} className="px-3 py-2.5 text-xs font-semibold text-slate-500 uppercase tracking-wide text-center">{f.label}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {PERMISSION_MODULES.map(mod => {
+                    const row = permData.find(m => m.module_code === mod.code) || {}
+                    return (
+                      <tr key={mod.code} className="border-b border-slate-50 last:border-b-0 hover:bg-slate-50/50">
+                        <td className="px-4 py-2.5 font-medium text-slate-700">{mod.label}</td>
+                        {PERM_FIELDS.map(f => (
+                          <td key={f.key} className="px-3 py-2.5 text-center">
+                            <input
+                              type="checkbox"
+                              className="w-4 h-4 accent-primary-600 cursor-pointer"
+                              checked={!!row[f.key]}
+                              onChange={() => togglePerm(mod.code, f.key)}
+                            />
+                          </td>
+                        ))}
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="flex gap-3 justify-end pt-2 border-t border-slate-100">
+            <button onClick={() => setPermModal(null)} className="btn-secondary">Cancel</button>
+            <button onClick={savePermissions} disabled={permSaving || permLoading} className="btn-primary">
+              {permSaving ? 'Saving...' : 'Save Permissions'}
+            </button>
           </div>
         </div>
       </FormModal>

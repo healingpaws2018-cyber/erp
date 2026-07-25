@@ -1,22 +1,23 @@
 import React, { useState, useEffect } from 'react'
 import { toast } from 'react-hot-toast'
-import { 
-  Plus, Trash2, Save, User, PawPrint, Stethoscope, 
+import {
+  Plus, Trash2, Save, User, PawPrint, Stethoscope,
   Search, History, Printer, Edit2, X, Info, Filter,
-  Calendar, ShoppingBag, ArrowRight, CheckCircle2
+  Calendar, ShoppingBag, ArrowRight, CheckCircle2, Syringe
 } from 'lucide-react'
 import api from '../api'
 import SalesBillPrint from '../components/SalesBillPrint'
 
-const EMPTY_LINE = { 
-  id: Date.now(), 
-  line_type: 'Medicine', 
-  medicine_id: '', 
-  batch_id: '', 
-  procedure_id: '', 
-  qty: 1, 
-  rate: 0, 
-  discount_pct: 0 
+const EMPTY_LINE = {
+  id: Date.now(),
+  line_type: 'Medicine',
+  medicine_id: '',
+  batch_id: '',
+  procedure_id: '',
+  vaccine_id: '',
+  qty: 1,
+  rate: 0,
+  discount_pct: 0
 }
 
 export default function SalesBill() {
@@ -26,6 +27,7 @@ export default function SalesBill() {
   const [doctors, setDoctors] = useState([])
   const [medicines, setMedicines] = useState([])
   const [procedures, setProcedures] = useState([])
+  const [vaccines, setVaccines] = useState([])   // vaccine master, for direct "Vaccination" line type
   const [batches, setBatches] = useState({}) 
   const [history, setHistory] = useState([])
   const [loading, setLoading] = useState(false)
@@ -37,6 +39,8 @@ export default function SalesBill() {
   const [withGst, setWithGst] = useState(true)   // GST toggle — false = no tax applied
   const [petPrescriptions, setPetPrescriptions] = useState([])
   const [showRxPicker, setShowRxPicker] = useState(false)
+  const [petVaccinations, setPetVaccinations] = useState([])
+  const [showVaccPicker, setShowVaccPicker] = useState(false)
 
   const [form, setForm] = useState({
     bill_date: new Date().toISOString().split('T')[0],
@@ -58,16 +62,18 @@ export default function SalesBill() {
 
   const fetchMasters = async () => {
     try {
-      const [o, d, m, p] = await Promise.all([
+      const [o, d, m, p, v] = await Promise.all([
         api.get('/owners'),
         api.get('/doctors'),
         api.get('/inventory/medicines'),
-        api.get('/services/procedures')
+        api.get('/services/procedures'),
+        api.get('/vaccines')
       ])
       setOwners(o.data)
       setDoctors(d.data)
       setMedicines(m.data)
       setProcedures(p.data)
+      setVaccines(v.data)
     } catch (err) { toast.error('Error loading master data') }
   }
 
@@ -104,6 +110,90 @@ export default function SalesBill() {
       const rxs = (res.data || []).filter(rx => rx.items && rx.items.length > 0)
       setPetPrescriptions(rxs)
     } catch (err) { setPetPrescriptions([]) }
+  }
+
+  // Fetch all vaccination records for a pet so the user can bill them from here,
+  // same pattern as "Load from Prescription".
+  const loadVaccinationsForPet = async (petId) => {
+    if (!petId) { setPetVaccinations([]); return }
+    try {
+      const res = await api.get(`/vaccination-records?pet_id=${petId}`)
+      setPetVaccinations(res.data || [])
+    } catch (err) { setPetVaccinations([]) }
+  }
+
+  // Pull one vaccination record into the bill as a billable line.
+  // Vaccines are only billable once linked to a Medicine in Masters → Vaccines
+  // (that link supplies the stock item, batches, and price).
+  // Unlike a plain "Choose Med..." pick, we resolve the FEFO batch immediately here
+  // (instead of leaving batch_id: 'auto') so the rate is filled in right away —
+  // vaccines are almost always a single dose from a single batch.
+  const applyVaccination = async (rec) => {
+    if (!rec.medicine_id) {
+      toast.error(`"${rec.vaccine_name}" isn't linked to a billable medicine yet — link it in Masters → Vaccines first`, { duration: 6000 })
+      return
+    }
+    const med = medicines.find(m => m.medicine_id === rec.medicine_id)
+    if (!med) {
+      toast.error(`Linked medicine for "${rec.vaccine_name}" was not found in inventory`)
+      return
+    }
+
+    // Get batch data directly (not via the cached `batches` state, which updates
+    // asynchronously and wouldn't be ready yet for the allocation below).
+    let batchList = batches[med.medicine_id]
+    if (!batchList) {
+      try {
+        const res = await api.get(`/inventory/batches/${med.medicine_id}`)
+        batchList = res.data || []
+        setBatches(prev => ({ ...prev, [med.medicine_id]: batchList }))
+      } catch (err) {
+        batchList = []
+      }
+    }
+
+    const available = (batchList || [])
+      .filter(b => parseFloat(b.current_qty) > 0)
+      .sort((a, b) => new Date(a.expiry_date) - new Date(b.expiry_date))
+
+    let newLine
+    if (available.length > 0) {
+      const b = available[0]   // earliest-expiry batch with stock (FEFO)
+      newLine = {
+        ...EMPTY_LINE,
+        id: Date.now() + Math.random(),
+        line_type: 'Medicine',
+        medicine_id: String(med.medicine_id),
+        batch_id: String(b.batch_id),
+        qty: 1,                            // one dose; editable
+        rate: parseFloat(b.sale_price) || 0,
+        discount_pct: 0,
+        gst_pct: med.gst_pct,
+      }
+    } else {
+      newLine = {
+        ...EMPTY_LINE,
+        id: Date.now() + Math.random(),
+        line_type: 'Medicine',
+        medicine_id: String(med.medicine_id),
+        batch_id: 'auto',
+        qty: 1,
+        rate: 0,
+        discount_pct: 0,
+        gst_pct: med.gst_pct,
+      }
+      toast.error(`No stock available for "${rec.vaccine_name}" — add opening/purchase stock in Masters → Vaccines first`, { duration: 6000 })
+    }
+
+    setForm(f => {
+      // Drop the blank starter line, keep any lines the user already filled.
+      const kept = f.items.filter(l => l.medicine_id || l.procedure_id)
+      return { ...f, items: [...kept, newLine] }
+    })
+    if (available.length > 0) {
+      toast.success(`Loaded ${rec.vaccine_name} (${new Date(rec.given_date).toLocaleDateString()}) — batch & rate auto-selected`)
+    }
+    setShowVaccPicker(false)
   }
 
   // Map a prescription item to a product in the medicines master:
@@ -165,6 +255,14 @@ export default function SalesBill() {
     const newItems = form.items.map(l => {
       if (l.id !== id) return l
       const updated = { ...l, [field]: value }
+      if (field === 'line_type') {
+        // Switching type clears whatever product/batch was picked for the old type.
+        updated.medicine_id = ''
+        updated.procedure_id = ''
+        updated.vaccine_id = ''
+        updated.batch_id = ''
+        updated.rate = 0
+      }
       if (field === 'medicine_id' && value) {
         fetchMedicineBatches(value)
         const med = medicines.find(m => m.medicine_id === parseInt(value))
@@ -186,6 +284,60 @@ export default function SalesBill() {
       return updated
     })
     setForm({ ...form, items: newItems })
+  }
+
+  // Pick a vaccine directly on a "Vaccination" line (no vaccination record needed).
+  // Resolves the vaccine's linked Medicine and the FEFO batch immediately, same as
+  // applyVaccination — so the rate fills in right away instead of needing an extra
+  // "Split" click.
+  const updateVaccineLine = async (lineId, vaccineId) => {
+    if (!vaccineId) {
+      setForm(f => ({ ...f, items: f.items.map(l => l.id === lineId ? { ...l, vaccine_id: '', medicine_id: '', batch_id: '', rate: 0 } : l) }))
+      return
+    }
+    const vac = vaccines.find(v => v.vaccine_id === parseInt(vaccineId))
+    if (!vac) return
+    if (!vac.medicine_id) {
+      toast.error(`"${vac.vaccine_name}" isn't linked to a billable medicine yet — link it in Masters → Vaccines first`, { duration: 6000 })
+      return
+    }
+    const med = medicines.find(m => m.medicine_id === vac.medicine_id)
+    if (!med) {
+      toast.error(`Linked medicine for "${vac.vaccine_name}" was not found in inventory`)
+      return
+    }
+
+    let batchList = batches[med.medicine_id]
+    if (!batchList) {
+      try {
+        const res = await api.get(`/inventory/batches/${med.medicine_id}`)
+        batchList = res.data || []
+        setBatches(prev => ({ ...prev, [med.medicine_id]: batchList }))
+      } catch (err) {
+        batchList = []
+      }
+    }
+    const available = (batchList || [])
+      .filter(b => parseFloat(b.current_qty) > 0)
+      .sort((a, b) => new Date(a.expiry_date) - new Date(b.expiry_date))
+
+    if (available.length === 0) {
+      toast.error(`No stock available for "${vac.vaccine_name}" — add opening/purchase stock in Masters → Vaccines first`, { duration: 6000 })
+    }
+    const b = available[0]
+
+    setForm(f => ({
+      ...f,
+      items: f.items.map(l => l.id === lineId ? {
+        ...l,
+        vaccine_id: vaccineId,
+        medicine_id: String(med.medicine_id),
+        batch_id: b ? String(b.batch_id) : 'auto',
+        qty: l.qty || 1,
+        rate: b ? (parseFloat(b.sale_price) || 0) : 0,
+        gst_pct: med.gst_pct,
+      } : l)
+    }))
   }
 
   // Total stock for a medicine across all its batches.
@@ -275,14 +427,18 @@ export default function SalesBill() {
 
   const handleSave = async () => {
     if (!form.owner_id) return toast.error('Please select an Owner')
-    if (form.items.some(l => (l.line_type==='Medicine' && (!l.medicine_id || !l.batch_id)) || (l.line_type==='Procedure' && !l.procedure_id))) {
+    if (form.items.some(l =>
+      (l.line_type==='Medicine' && (!l.medicine_id || !l.batch_id)) ||
+      (l.line_type==='Procedure' && !l.procedure_id) ||
+      (l.line_type==='Vaccination' && (!l.vaccine_id || !l.medicine_id || !l.batch_id))
+    )) {
       return toast.error('Each line needs a product (and batch / Auto) selected')
     }
 
-    // Expand any remaining "Auto (FEFO)" medicine lines into concrete per-batch lines.
+    // Expand any remaining "Auto (FEFO)" medicine/vaccination lines into concrete per-batch lines.
     let expandedItems = []
     for (const l of form.items) {
-      if (l.line_type === 'Medicine' && l.batch_id === 'auto') {
+      if ((l.line_type === 'Medicine' || l.line_type === 'Vaccination') && l.batch_id === 'auto') {
         const { lines, error } = allocateFEFO(l.medicine_id, l.qty, { discount_pct: l.discount_pct, gst_pct: l.gst_pct })
         if (error) return toast.error(error)
         expandedItems.push(...lines)
@@ -293,10 +449,12 @@ export default function SalesBill() {
 
     setSaving(true)
     try {
-      // Format items for backend
+      // Format items for backend. "Vaccination" is a frontend-only line type —
+      // it's billed as a Medicine line under the hood (see vaccine_billing memory),
+      // so it's sent to the backend as line_type 'Medicine'.
       const items = expandedItems.map((l, idx) => ({
         line_no: idx + 1,
-        line_type: l.line_type,
+        line_type: l.line_type === 'Vaccination' ? 'Medicine' : l.line_type,
         medicine_id: l.medicine_id ? parseInt(l.medicine_id) : null,
         batch_id: l.batch_id ? parseInt(l.batch_id) : null,
         procedure_id: l.procedure_id ? parseInt(l.procedure_id) : null,
@@ -347,6 +505,8 @@ export default function SalesBill() {
     setEditingBillId(null)
     setPetPrescriptions([])
     setShowRxPicker(false)
+    setPetVaccinations([])
+    setShowVaccPicker(false)
   }
 
   const handleEdit = (bill) => {
@@ -371,6 +531,7 @@ export default function SalesBill() {
     })
     if (bill.owner_id) fetchOwnerPets(bill.owner_id)
     if (bill.pet_id) loadPrescriptionsForPet(bill.pet_id)
+    if (bill.pet_id) loadVaccinationsForPet(bill.pet_id)
     bill.items.forEach(i => { if(i.medicine_id) fetchMedicineBatches(i.medicine_id) })
     setActiveTab('new')
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -462,7 +623,7 @@ export default function SalesBill() {
               </div>
               <div>
                 <label className="label flex items-center gap-2"><PawPrint size={14}/> Pet Name</label>
-                <select className="input-field h-11 text-sm font-bold" value={form.pet_id} onChange={e => { setForm({...form, pet_id: e.target.value}); loadPrescriptionsForPet(e.target.value); }}>
+                <select className="input-field h-11 text-sm font-bold" value={form.pet_id} onChange={e => { setForm({...form, pet_id: e.target.value}); loadPrescriptionsForPet(e.target.value); loadVaccinationsForPet(e.target.value); }}>
                   <option value="">Select Pet...</option>
                   {pets.map(p => <option key={p.pet_id} value={p.pet_id}>{p.name}</option>)}
                 </select>
@@ -561,6 +722,64 @@ export default function SalesBill() {
               </div>
             )}
 
+            {/* LOAD FROM VACCINATION RECORD */}
+            {form.pet_id && (
+              <div className="mb-6">
+                {petVaccinations.length === 0 ? (
+                  <div className="text-[11px] text-slate-400 font-bold italic flex items-center gap-2">
+                    <Info size={14} /> No vaccination records found for this pet.
+                  </div>
+                ) : (
+                  <div className="bg-rose-50 border border-rose-100 rounded-2xl p-4">
+                    <button
+                      type="button"
+                      onClick={() => setShowVaccPicker(s => !s)}
+                      className="flex items-center gap-2 text-xs font-black uppercase tracking-widest text-rose-700 hover:text-rose-900 transition-colors"
+                    >
+                      <Syringe size={16} />
+                      Load from Vaccination Record ({petVaccinations.length})
+                      <ArrowRight size={14} className={`transition-transform ${showVaccPicker ? 'rotate-90' : ''}`} />
+                    </button>
+
+                    {showVaccPicker && (
+                      <div className="mt-4 space-y-2">
+                        {petVaccinations.map(rec => (
+                          <div key={rec.vacc_record_id} className="bg-white rounded-xl border border-rose-100 p-3 flex items-center justify-between gap-4">
+                            <div className="min-w-0">
+                              <div className="text-xs font-black text-slate-700 font-mono">{rec.vacc_record_no}</div>
+                              <div className="text-[10px] text-slate-400 font-bold flex items-center gap-1">
+                                <Calendar size={10} /> {new Date(rec.given_date).toLocaleDateString()}
+                              </div>
+                              <div className="text-[11px] text-slate-500 mt-1 truncate">
+                                {rec.vaccine_name}
+                                {!rec.medicine_id && (
+                                  <span className="ml-2 text-[9px] font-black uppercase text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
+                                    Not linked to a billable item
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => applyVaccination(rec)}
+                              disabled={!rec.medicine_id}
+                              className="shrink-0 px-3 py-2 bg-rose-600 text-white text-[10px] font-black uppercase tracking-widest rounded-lg hover:bg-rose-700 transition-all active:scale-95 flex items-center gap-1.5 disabled:bg-slate-300 disabled:cursor-not-allowed"
+                            >
+                              <Plus size={12} /> Bill This
+                            </button>
+                          </div>
+                        ))}
+                        <p className="text-[10px] text-rose-500 font-bold pt-1">
+                          Added as a Medicine line via the vaccine's linked inventory item. Select a batch and confirm the quantity.
+                          Link a vaccine to a Medicine under Masters → Vaccines if it shows as "Not linked".
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* BILL LINES */}
             <div className="overflow-x-auto -mx-6 px-6 mb-6">
               <table className="w-full text-xs min-w-[900px]">
@@ -582,6 +801,7 @@ export default function SalesBill() {
                       <td className="px-4 py-3">
                         <select className="input-field py-1.5 font-bold" value={l.line_type} onChange={e => updateLine(l.id, 'line_type', e.target.value)}>
                           <option value="Medicine">Medicine Item</option>
+                          <option value="Vaccination">Vaccination</option>
                           <option value="Procedure">Svc Procedure</option>
                         </select>
                       </td>
@@ -591,6 +811,11 @@ export default function SalesBill() {
                             <option value="">Choose Med...</option>
                             {medicines.map(m => <option key={m.medicine_id} value={m.medicine_id}>{m.medicine_name}</option>)}
                           </select>
+                        ) : l.line_type === 'Vaccination' ? (
+                          <select className="input-field py-1.5 font-bold text-rose-700" value={l.vaccine_id} onChange={e => updateVaccineLine(l.id, e.target.value)}>
+                            <option value="">Choose Vaccine...</option>
+                            {vaccines.filter(v => v.medicine_id).map(v => <option key={v.vaccine_id} value={v.vaccine_id}>{v.vaccine_name}</option>)}
+                          </select>
                         ) : (
                           <select className="input-field py-1.5 font-bold" value={l.procedure_id} onChange={e => updateLine(l.id, 'procedure_id', e.target.value)}>
                             <option value="">Choose Svc...</option>
@@ -599,7 +824,7 @@ export default function SalesBill() {
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        {l.line_type === 'Medicine' && (
+                        {(l.line_type === 'Medicine' || l.line_type === 'Vaccination') && (
                           <div className="flex flex-col gap-1">
                             <select className="input-field py-1.5 text-[10px] font-black uppercase text-indigo-600" value={l.batch_id} onChange={e => updateLine(l.id, 'batch_id', e.target.value)}>
                               <option value="">Batch...</option>

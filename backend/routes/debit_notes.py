@@ -96,53 +96,60 @@ def create_debit_note(data: DebitNoteCreate, db: Session = Depends(get_db)):
             db.add(dn_item)
             
         # Post to GL
-        # CR: gl_party_id (net_amount)       — supplier owes less
-        # DR: gl_debit_id (taxable_amount)   — purchase return
-        # DR: GST-CGST-IN (cgst_amount)      — reduce input credit
-        # DR: GST-SGST-IN (sgst_amount)
-        # [if interstate: DR: GST-IGST-IN]
-        
-        cr_party = GLPosting(
+        # A debit note reduces what WE owe the supplier (Creditors is a liability with
+        # a normal CREDIT balance, so reducing it takes a DEBIT) and reduces our
+        # purchases expense and recoverable input GST (both normal-DEBIT accounts, so
+        # reducing them takes a CREDIT) — see chart_of_accounts.md project memory. This
+        # used to be backwards (CR the party, DR everywhere else), which pushed the
+        # supplier's balance the WRONG direction — increasing what we appeared to owe
+        # them — on every debit note.
+        # DR: gl_party_id (net_amount)       — supplier owes less
+        # CR: gl_debit_id (taxable_amount)   — purchase return
+        # CR: GST-CGST-IN (cgst_amount)      — reduce input credit
+        # CR: GST-SGST-IN (sgst_amount)
+        # [if interstate: CR: GST-IGST-IN]
+
+        dr_party = GLPosting(
             fy_code=data.fy_code,
             posting_date=data.voucher_date,
             gl_id=data.gl_party_id,
             voucher_type="DebitNote",
             voucher_no=data.voucher_no,
             voucher_ref_id=dn.dn_id,
-            dr_amount=0,
-            cr_amount=data.net_amount or 0,
+            dr_amount=data.net_amount or 0,
+            cr_amount=0,
             narration=data.narration
         )
-        db.add(cr_party)
-        
+        db.add(dr_party)
+
         if data.gl_debit_id and (data.taxable_amount or 0) > 0:
-            dr_purch_ret = GLPosting(
+            cr_purch_ret = GLPosting(
                 fy_code=data.fy_code,
                 posting_date=data.voucher_date,
                 gl_id=data.gl_debit_id,
                 voucher_type="DebitNote",
                 voucher_no=data.voucher_no,
                 voucher_ref_id=dn.dn_id,
-                dr_amount=data.taxable_amount,
-                cr_amount=0,
+                dr_amount=0,
+                cr_amount=data.taxable_amount,
                 narration=data.narration
             )
-            db.add(dr_purch_ret)
-            
+            db.add(cr_purch_ret)
+
         if not data.is_interstate:
             if (data.cgst_amount or 0) > 0:
                 cgst_gl = get_gl_by_code(db, "GST-CGST-IN")
                 if cgst_gl:
-                    db.add(GLPosting(fy_code=data.fy_code, posting_date=data.voucher_date, gl_id=cgst_gl, voucher_type="DebitNote", voucher_no=data.voucher_no, voucher_ref_id=dn.dn_id, dr_amount=data.cgst_amount, cr_amount=0, narration=data.narration))
+                    db.add(GLPosting(fy_code=data.fy_code, posting_date=data.voucher_date, gl_id=cgst_gl, voucher_type="DebitNote", voucher_no=data.voucher_no, voucher_ref_id=dn.dn_id, dr_amount=0, cr_amount=data.cgst_amount, narration=data.narration))
             if (data.sgst_amount or 0) > 0:
                 sgst_gl = get_gl_by_code(db, "GST-SGST-IN")
                 if sgst_gl:
-                    db.add(GLPosting(fy_code=data.fy_code, posting_date=data.voucher_date, gl_id=sgst_gl, voucher_type="DebitNote", voucher_no=data.voucher_no, voucher_ref_id=dn.dn_id, dr_amount=data.sgst_amount, cr_amount=0, narration=data.narration))
+                    db.add(GLPosting(fy_code=data.fy_code, posting_date=data.voucher_date, gl_id=sgst_gl, voucher_type="DebitNote", voucher_no=data.voucher_no, voucher_ref_id=dn.dn_id, dr_amount=0, cr_amount=data.sgst_amount, narration=data.narration))
         else:
             if (data.igst_amount or 0) > 0:
                 igst_gl = get_gl_by_code(db, "GST-IGST-IN")
                 if igst_gl:
-                    db.add(GLPosting(fy_code=data.fy_code, posting_date=data.voucher_date, gl_id=igst_gl, voucher_type="DebitNote", voucher_no=data.voucher_no, voucher_ref_id=dn.dn_id, dr_amount=data.igst_amount, cr_amount=0, narration=data.narration))
+                    db.add(GLPosting(fy_code=data.fy_code, posting_date=data.voucher_date, gl_id=igst_gl, voucher_type="DebitNote", voucher_no=data.voucher_no, voucher_ref_id=dn.dn_id, dr_amount=0, cr_amount=data.igst_amount, narration=data.narration))
 
         db.commit()
         db.refresh(dn)

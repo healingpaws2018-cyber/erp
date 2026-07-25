@@ -4,7 +4,7 @@ routes/companies.py — Company Management, Auto DB Creation & RBAC Module Permi
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
-from database import get_master_db, DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, Base
+from database import get_master_db, get_engine_for_db, DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, Base
 from models.master_sys import Tenant, CompanyProfile, Role, MasterUser, UserModuleAccess
 from models.clinic import ClinicSetup
 from models.phase4 import FinancialYear
@@ -270,7 +270,8 @@ def update_company_module_access(company_id: int, data: UserModuleAccessUpdate, 
     return {"message": "Module permissions updated successfully"}
 
 
-from models.phase4 import FinancialYear, GLMaster, OpeningBalance, Voucher
+from models.phase4 import FinancialYear, GLMaster, OpeningBalance
+from models.accounts import GLPosting
 from sqlalchemy.sql import func
 
 @router.post("/{company_id}/rollover")
@@ -334,9 +335,15 @@ def rollover_financial_year(company_id: int, db: Session = Depends(get_master_db
             if ob and ob.balance_type == "CR":
                 balance = -balance
 
-            # Add debits and subtract credits from Vouchers in current FY
-            debits = c_db.query(func.sum(Voucher.amount)).filter(Voucher.fy_code == current_fy.fy_code, Voucher.debit_gl == gl.gl_id).scalar() or 0
-            credits = c_db.query(func.sum(Voucher.amount)).filter(Voucher.fy_code == current_fy.fy_code, Voucher.credit_gl == gl.gl_id).scalar() or 0
+            # Add debits and subtract credits actually posted to the ledger in the current FY.
+            # This used to sum models.phase4.Voucher — a simple single debit_gl/credit_gl/amount
+            # table that is never instantiated anywhere in the app (grepped across routes/*.py to
+            # confirm). Every real posting (Sales/Purchase Bill, Payment/Receipt Voucher, Credit/
+            # Debit Note, Advance Payment, Bank Arrival, Journal Voucher) writes to gl_postings via
+            # GLPosting instead, so summing Voucher always produced a closing balance of 0 (rolled
+            # forward as if nothing happened all year) regardless of actual activity.
+            debits = c_db.query(func.sum(GLPosting.dr_amount)).filter(GLPosting.fy_code == current_fy.fy_code, GLPosting.gl_id == gl.gl_id).scalar() or 0
+            credits = c_db.query(func.sum(GLPosting.cr_amount)).filter(GLPosting.fy_code == current_fy.fy_code, GLPosting.gl_id == gl.gl_id).scalar() or 0
 
             closing_balance = balance + debits - credits
             new_bal_type = "DR" if closing_balance >= 0 else "CR"

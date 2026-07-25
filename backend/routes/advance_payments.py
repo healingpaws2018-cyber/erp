@@ -6,13 +6,47 @@ from datetime import datetime
 from decimal import Decimal
 
 from database import get_db
-from models.accounts import AdvancePayment
+from models.accounts import AdvancePayment, GLPosting
 from schemas.accounts import (
     AdvancePaymentCreate, AdvancePaymentUpdate, AdvancePaymentOut
 )
 from utils.doc_sequence import get_next_doc_no, format_fy
+from utils.gl_utils import get_gl_by_code
 
 router = APIRouter(prefix="/accounts/advance-payments", tags=["Accounts"])
+
+
+def _post_advance_payment_to_gl(db: Session, adv: AdvancePayment, data: AdvancePaymentCreate):
+    """
+    Advance "Given" (party_type='Supplier'): we prepay a supplier before a bill
+    exists. DR ADV-SUP (prepaid asset increases) / CR gl_cashbank_id (money leaves
+    the bank).
+    Advance "Received" (party_type='Customer'): a customer pays us before a bill
+    exists. DR gl_cashbank_id (money arrives) / CR ADV-CUST (liability — we owe
+    them goods/services, or a refund).
+    """
+    if (data.amount or 0) <= 0:
+        return
+    common = dict(
+        fy_code=data.fy_code,
+        posting_date=data.voucher_date,
+        voucher_type="AdvancePayment",
+        voucher_no=data.voucher_no,
+        voucher_ref_id=adv.adv_id,
+        narration=data.narration,
+    )
+    if data.party_type == "Customer":
+        adv_gl = get_gl_by_code(db, "ADV-CUST")
+        if not adv_gl:
+            raise HTTPException(status_code=500, detail="Chart of Accounts is missing system account 'ADV-CUST' (Advance from Customers).")
+        db.add(GLPosting(**common, gl_id=data.gl_cashbank_id, dr_amount=data.amount, cr_amount=0))
+        db.add(GLPosting(**common, gl_id=adv_gl, dr_amount=0, cr_amount=data.amount))
+    else:
+        adv_gl = get_gl_by_code(db, "ADV-SUP")
+        if not adv_gl:
+            raise HTTPException(status_code=500, detail="Chart of Accounts is missing system account 'ADV-SUP' (Advance to Suppliers).")
+        db.add(GLPosting(**common, gl_id=adv_gl, dr_amount=data.amount, cr_amount=0))
+        db.add(GLPosting(**common, gl_id=data.gl_cashbank_id, dr_amount=0, cr_amount=data.amount))
 
 
 def _ensure_ad_sequence(db: Session, fy_code: str):
@@ -52,26 +86,37 @@ def create_advance_payment(data: AdvancePaymentCreate, db: Session = Depends(get
         _ensure_ad_sequence(db, data.fy_code)
         data.voucher_no = get_next_doc_no(db, "AD")
 
-    adv = AdvancePayment(
-        fy_code=data.fy_code,
-        voucher_no=data.voucher_no,
-        voucher_date=data.voucher_date,
-        gl_party_id=data.gl_party_id,
-        party_name=data.party_name,
-        party_type=data.party_type,
-        gl_cashbank_id=data.gl_cashbank_id,
-        cashbank_name=data.cashbank_name,
-        amount=data.amount,
-        adjusted_amount=Decimal("0"),
-        doc_no=data.doc_no,
-        doc_date=data.doc_date,
-        narration=data.narration,
-        status="Open"
-    )
-    db.add(adv)
-    db.commit()
-    db.refresh(adv)
-    return adv
+    try:
+        adv = AdvancePayment(
+            fy_code=data.fy_code,
+            voucher_no=data.voucher_no,
+            voucher_date=data.voucher_date,
+            gl_party_id=data.gl_party_id,
+            party_name=data.party_name,
+            party_type=data.party_type,
+            gl_cashbank_id=data.gl_cashbank_id,
+            cashbank_name=data.cashbank_name,
+            amount=data.amount,
+            adjusted_amount=Decimal("0"),
+            doc_no=data.doc_no,
+            doc_date=data.doc_date,
+            narration=data.narration,
+            status="Open"
+        )
+        db.add(adv)
+        db.flush()
+
+        _post_advance_payment_to_gl(db, adv, data)
+
+        db.commit()
+        db.refresh(adv)
+        return adv
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Failed to create advance payment: {e}")
 
 
 @router.get("/", response_model=List[AdvancePaymentOut])
@@ -128,6 +173,23 @@ def delete_advance_payment(adv_id: int, db: Session = Depends(get_db)):
     if not adv:
         raise HTTPException(status_code=404, detail="Advance Payment not found")
 
-    adv.status = "Cancelled"
-    db.commit()
-    return {"message": "Advance Payment cancelled successfully"}
+    if (adv.adjusted_amount or Decimal("0")) > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot cancel: this advance has already been adjusted against one or more payment vouchers. Cancel those first."
+        )
+
+    try:
+        adv.status = "Cancelled"
+
+        # Reverse GL Postings
+        db.query(GLPosting).filter(
+            GLPosting.voucher_type == 'AdvancePayment',
+            GLPosting.voucher_ref_id == adv_id
+        ).delete()
+
+        db.commit()
+        return {"message": "Advance Payment cancelled successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Failed to cancel advance payment: {e}")

@@ -168,6 +168,31 @@ export default function Companies() {
         modules: data.modules
       }))
 
+      // Cache this user's module View/Create/Edit/Delete/Export permissions for Sidebar.jsx
+      // and App.jsx's route guard to read (see constants/permissions.js). Mirrors the same
+      // fetch Login.jsx does after its own select-company call — this function is the OTHER
+      // path that can land a fresh token+user in localStorage (switching company context
+      // from the Companies screen), so it needs the same caching or the guard would fall
+      // back to stale/missing permissions until the next full login. Never blocks the
+      // context switch if this fails.
+      try {
+        const permRes = await fetch(`http://localhost:8000/users/${data.user_id}/permissions`, {
+          headers: { Authorization: `Bearer ${data.access_token}` }
+        })
+        const permData = await permRes.json()
+        if (permRes.ok) {
+          localStorage.setItem('permissions', JSON.stringify({
+            modules: permData.modules,
+            has_custom_permissions: permData.has_custom_permissions,
+          }))
+        } else {
+          localStorage.removeItem('permissions')
+        }
+      } catch (permErr) {
+        console.warn('Could not load module permissions — defaulting to unrestricted access', permErr)
+        localStorage.removeItem('permissions')
+      }
+
       alert(`✅ Context established for ${data.company_name}! Active database is now ${data.db_name}.`)
       window.location.href = '/dashboard'
     } catch (err) {

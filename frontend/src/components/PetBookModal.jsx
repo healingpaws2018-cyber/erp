@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import { toast } from 'react-hot-toast'
-import { X, Calendar, Activity, AlertTriangle, FileText, Plus, Filter, Heart, User, Shield, Tag, Share2 } from 'lucide-react'
+import { X, Calendar, Activity, AlertTriangle, FileText, Plus, Filter, Heart, User, Shield, Tag, Share2, Award, Printer } from 'lucide-react'
 import api from '../api'
 import PetBookPrint from './PetBookPrint'
+import CertificateIssueModal from './CertificateIssueModal'
+import CertificatePrint from './CertificatePrint'
 
 export default function PetBookModal({ isOpen, onClose, petId }) {
   const [data, setData] = useState(null)
@@ -10,6 +12,21 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('timeline')
   const [showExport, setShowExport] = useState(false)
+
+  // Certificates
+  const [certificates, setCertificates] = useState([])
+  const [certsLoading, setCertsLoading] = useState(false)
+  const [showIssueCert, setShowIssueCert] = useState(false)
+  const [printCert, setPrintCert] = useState(null)
+
+  const loadCertificates = () => {
+    if (!petId) return
+    setCertsLoading(true)
+    api.get('/certificates', { params: { pet_id: petId } })
+      .then(r => setCertificates(r.data || []))
+      .catch(() => setCertificates([]))
+      .finally(() => setCertsLoading(false))
+  }
   
   // Timeline filters
   const [filters, setFilters] = useState({
@@ -43,6 +60,7 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
   useEffect(() => {
     if (isOpen && petId) {
       loadBook()
+      loadCertificates()
       api.get('/clinic/setup').then(r => setClinic(r.data)).catch(() => {})
     }
   }, [isOpen, petId])
@@ -255,6 +273,15 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
                   <FileText size={18} />
                   <span>Lab & Diagnostics</span>
                   <span className="ml-auto text-xs bg-black/10 px-2 py-0.5 rounded-full">{data.labs.length}</span>
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('certificates')}
+                  className={`flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-sm transition-all ${activeTab === 'certificates' ? 'bg-primary-600 text-white shadow-lg shadow-primary-600/20' : 'text-slate-600 hover:bg-slate-100'}`}
+                >
+                  <Award size={18} />
+                  <span>Certificates</span>
+                  <span className="ml-auto text-xs bg-black/10 px-2 py-0.5 rounded-full">{certificates.length}</span>
                 </button>
 
                 <div className="mt-auto pt-4 border-t border-slate-200/60 flex flex-col gap-2">
@@ -591,6 +618,65 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
                   </div>
                 )}
 
+                {/* 5. CERTIFICATES TAB */}
+                {activeTab === 'certificates' && (
+                  <div className="flex flex-col gap-6 max-w-4xl mx-auto">
+                    <div className="flex items-center justify-between pb-4 border-b border-slate-100 flex-wrap gap-4">
+                      <div>
+                        <h3 className="text-lg font-bold text-slate-800">Certificates</h3>
+                        <p className="text-xs text-slate-500">Auto-generated ARV, health, travel, sterilization and other official certificates for this pet</p>
+                      </div>
+                      <button
+                        onClick={() => setShowIssueCert(true)}
+                        className="btn-primary flex items-center gap-2 shadow-md"
+                      >
+                        <Plus size={16} /> Issue Certificate
+                      </button>
+                    </div>
+
+                    {certsLoading ? (
+                      <div className="text-center py-16 text-sm text-slate-400">Loading certificates…</div>
+                    ) : certificates.length === 0 ? (
+                      <div className="text-center py-16 bg-slate-50 rounded-2xl border border-dashed border-slate-200 p-8">
+                        <Award size={28} className="mx-auto text-slate-300 mb-2" />
+                        <p className="text-slate-500 font-medium text-sm">No certificates issued yet for this pet.</p>
+                      </div>
+                    ) : (
+                      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+                        <table className="w-full text-left border-collapse">
+                          <thead>
+                            <tr className="bg-slate-50/75 border-b border-slate-100 text-slate-500 text-xs font-bold uppercase tracking-wider">
+                              <th className="py-3.5 px-6">Certificate</th>
+                              <th className="py-3.5 px-6">Cert No</th>
+                              <th className="py-3.5 px-6">Issue Date</th>
+                              <th className="py-3.5 px-6">Doctor</th>
+                              <th className="py-3.5 px-6"></th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 text-sm text-slate-600">
+                            {certificates.map(c => (
+                              <tr key={c.certificate_id} className="hover:bg-slate-50/50 transition-colors">
+                                <td className="py-4 px-6 font-semibold text-slate-800">{c.cert_type_label}</td>
+                                <td className="py-4 px-6 font-mono text-xs">{c.cert_no}</td>
+                                <td className="py-4 px-6">{c.issue_date}</td>
+                                <td className="py-4 px-6">{c.doctor_name || '—'}</td>
+                                <td className="py-4 px-6 text-right">
+                                  <button
+                                    onClick={() => setPrintCert(c)}
+                                    className="btn-secondary text-xs flex items-center gap-1.5 ml-auto"
+                                  >
+                                    <Printer size={13} /> Print / Share
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
+
               </div>
             </div>
 
@@ -601,6 +687,32 @@ export default function PetBookModal({ isOpen, onClose, petId }) {
 
       {showExport && data && (
         <PetBookPrint data={data} clinic={clinic} onClose={() => setShowExport(false)} />
+      )}
+
+      {showIssueCert && data && (
+        <CertificateIssueModal
+          isOpen={showIssueCert}
+          onClose={() => setShowIssueCert(false)}
+          petId={petId}
+          timeline={data.timeline || []}
+          summary={data.summary || {}}
+          onIssued={(cert) => {
+            setCertificates(prev => [cert, ...prev])
+            setShowIssueCert(false)
+            setActiveTab('certificates')
+            setPrintCert(cert)
+          }}
+        />
+      )}
+
+      {printCert && data && (
+        <CertificatePrint
+          certificate={printCert}
+          pet={data.pet}
+          summary={data.summary}
+          clinic={clinic}
+          onClose={() => setPrintCert(null)}
+        />
       )}
     </div>
   )

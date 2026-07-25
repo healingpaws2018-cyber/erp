@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from typing import List, Optional
 from datetime import date
@@ -9,7 +9,8 @@ from database import get_db
 from models.phase4 import GLMaster, OpeningBalance
 from models.accounts import GLPosting
 from models.stage3 import SalesBill, SalesBillItem
-from models.phase3 import PurchaseBill, PurchaseBillItem
+from models.phase3 import PurchaseBill, PurchaseBillItem, Supplier
+from models.clinic import ClinicSetup
 from models.accounts import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem
 from sqlalchemy import func
 
@@ -275,6 +276,44 @@ def get_cash_book(
 # ---------------------------------------------------------------------------
 # GST Reports Endpoints
 # ---------------------------------------------------------------------------
+#
+# NOTE (2026-07-24): every one of these five endpoints previously referenced
+# column names that don't exist on the real models — SalesBill.taxable_amount
+# (real column: taxable_amt), SalesBill.bill_no (real: bill_number),
+# SalesBill.gstin (real: party_gstin), PetOwner.owner_name (real: name),
+# SalesBillItem.quantity (real: qty), and PurchaseBill.taxable_amount /
+# cgst_amount / sgst_amount / igst_amount (none of these exist on PurchaseBill
+# at all — it only has a blended `gst_amount` column that record_purchase()
+# in routes/pharmacy.py never even populates). Every endpoint below raised an
+# AttributeError the instant it was called — rewritten against the actual
+# schema. Purchase-side taxable/cgst/sgst/igst are recomputed from
+# PurchaseBillItem line data (purchase_price × qty, gst_pct) using the same
+# formula and interstate CGST+SGST-vs-IGST split as
+# routes/pharmacy.py's _post_purchase_bill_to_gl / _is_interstate_purchase.
+
+
+def _purchase_bill_is_interstate(supplier, clinic) -> bool:
+    if supplier and supplier.state_code and clinic and clinic.state_code:
+        return supplier.state_code != clinic.state_code
+    return False
+
+
+def _purchase_bill_tax_breakdown(bill, supplier, clinic):
+    """Recompute (taxable, cgst, sgst, igst) for one PurchaseBill from its items."""
+    taxable = Decimal("0.00")
+    total_gst = Decimal("0.00")
+    for item in bill.items:
+        qty = Decimal(item.quantity or 0) + Decimal(item.free_quantity or 0)
+        gross = (item.purchase_price or Decimal("0.00")) * qty
+        gst_amt = gross * ((item.gst_pct or Decimal("0.00")) / Decimal("100"))
+        taxable += gross
+        total_gst += gst_amt
+
+    if _purchase_bill_is_interstate(supplier, clinic):
+        return taxable, Decimal("0.00"), Decimal("0.00"), total_gst
+    half = (total_gst / 2).quantize(Decimal("0.01"))
+    return taxable, half, total_gst - half, Decimal("0.00")
+
 
 @router.get("/gst/sales-register")
 def get_sales_register(
@@ -284,15 +323,13 @@ def get_sales_register(
     db: Session = Depends(get_db),
 ):
     """Sales Register with credit notes as negative rows."""
-    # Base query for sales bills
-    sales_q = db.query(SalesBill).filter(SalesBill.fy_code == fy_code)
+    sales_q = db.query(SalesBill).options(joinedload(SalesBill.owner)).filter(SalesBill.fy_code == fy_code)
     if from_date:
         sales_q = sales_q.filter(SalesBill.bill_date >= from_date)
     if to_date:
         sales_q = sales_q.filter(SalesBill.bill_date <= to_date)
     sales = sales_q.all()
 
-    # Credit notes (negative)
     cn_q = db.query(CreditNote).filter(CreditNote.fy_code == fy_code)
     if from_date:
         cn_q = cn_q.filter(CreditNote.voucher_date >= from_date)
@@ -302,34 +339,42 @@ def get_sales_register(
 
     rows = []
     for sb in sales:
+        taxable = sb.taxable_amt or Decimal("0.00")
+        cgst = sb.cgst_amt or Decimal("0.00")
+        sgst = sb.sgst_amt or Decimal("0.00")
+        igst = sb.igst_amt or Decimal("0.00")
         rows.append({
             "date": sb.bill_date,
-            "voucher_no": sb.bill_no,
-            "party_name": sb.owner.owner_name if hasattr(sb, "owner") else None,
-            "gstin": sb.gstin,
-            "taxable": float(sb.taxable_amount),
-            "cgst": float(sb.cgst_amount),
-            "sgst": float(sb.sgst_amount),
-            "igst": float(sb.igst_amount),
-            "total": float(sb.taxable_amount + sb.cgst_amount + sb.sgst_amount + sb.igst_amount),
+            "voucher_no": sb.bill_number,
+            "party_name": sb.owner.name if sb.owner else None,
+            "gstin": sb.party_gstin,
+            "taxable": float(taxable),
+            "cgst": float(cgst),
+            "sgst": float(sgst),
+            "igst": float(igst),
+            "total": float(taxable + cgst + sgst + igst),
             "type": "sales",
         })
     for cn in credit_notes:
+        taxable = cn.taxable_amount or Decimal("0.00")
+        cgst = cn.cgst_amount or Decimal("0.00")
+        sgst = cn.sgst_amount or Decimal("0.00")
+        igst = cn.igst_amount or Decimal("0.00")
         rows.append({
             "date": cn.voucher_date,
             "voucher_no": cn.voucher_no,
             "party_name": cn.party_name,
-            "gstin": None,
-            "taxable": -float(cn.taxable_amount),
-            "cgst": -float(cn.cgst_amount),
-            "sgst": -float(cn.sgst_amount),
-            "igst": -float(cn.igst_amount),
-            "total": -float(cn.taxable_amount + cn.cgst_amount + cn.sgst_amount + cn.igst_amount),
+            "gstin": cn.gstin,
+            "taxable": -float(taxable),
+            "cgst": -float(cgst),
+            "sgst": -float(sgst),
+            "igst": -float(igst),
+            "total": -float(taxable + cgst + sgst + igst),
             "type": "credit_note",
         })
-    # Sort by date
     rows.sort(key=lambda r: r["date"])
     return {"sales_register": rows}
+
 
 @router.get("/gst/b2b")
 def get_gst_b2b(
@@ -339,50 +384,52 @@ def get_gst_b2b(
     db: Session = Depends(get_db),
 ):
     """B2B report – only customers with GSTIN, net of credit notes."""
-    # Gather sales bills
-    sales_q = db.query(SalesBill).filter(
+    sales_q = db.query(SalesBill).options(joinedload(SalesBill.owner)).filter(
         SalesBill.fy_code == fy_code,
-        SalesBill.gstin != None,
-        SalesBill.gstin != ""
+        SalesBill.party_gstin != None,
+        SalesBill.party_gstin != ""
     )
     if from_date:
         sales_q = sales_q.filter(SalesBill.bill_date >= from_date)
     if to_date:
         sales_q = sales_q.filter(SalesBill.bill_date <= to_date)
     sales = sales_q.all()
-    # Credit notes (negative)
-    cn_q = db.query(CreditNote).filter(CreditNote.fy_code == fy_code)
+
+    cn_q = db.query(CreditNote).filter(
+        CreditNote.fy_code == fy_code,
+        CreditNote.gstin != None,
+        CreditNote.gstin != ""
+    )
     if from_date:
         cn_q = cn_q.filter(CreditNote.voucher_date >= from_date)
     if to_date:
         cn_q = cn_q.filter(CreditNote.voucher_date <= to_date)
     credit_notes = cn_q.all()
 
-    # Aggregate per GSTIN
     agg = {}
     for sb in sales:
-        gstin = sb.gstin
+        gstin = sb.party_gstin
         if gstin not in agg:
-            agg[gstin] = {"taxable": 0.0, "cgst": 0.0, "sgst": 0.0, "igst": 0.0}
-        agg[gstin]["taxable"] += float(sb.taxable_amount)
-        agg[gstin]["cgst"] += float(sb.cgst_amount)
-        agg[gstin]["sgst"] += float(sb.sgst_amount)
-        agg[gstin]["igst"] += float(sb.igst_amount)
+            agg[gstin] = {"party_name": sb.owner.name if sb.owner else None, "taxable": 0.0, "cgst": 0.0, "sgst": 0.0, "igst": 0.0}
+        agg[gstin]["taxable"] += float(sb.taxable_amt or 0)
+        agg[gstin]["cgst"] += float(sb.cgst_amt or 0)
+        agg[gstin]["sgst"] += float(sb.sgst_amt or 0)
+        agg[gstin]["igst"] += float(sb.igst_amt or 0)
     for cn in credit_notes:
-        # Credit notes may not have GSTIN; skip if none
-        gstin = None
-        if not gstin:
-            continue
+        gstin = cn.gstin
         if gstin not in agg:
-            agg[gstin] = {"taxable": 0.0, "cgst": 0.0, "sgst": 0.0, "igst": 0.0}
-        agg[gstin]["taxable"] -= float(cn.taxable_amount)
-        agg[gstin]["cgst"] -= float(cn.cgst_amount)
-        agg[gstin]["sgst"] -= float(cn.sgst_amount)
-        agg[gstin]["igst"] -= float(cn.igst_amount)
+            agg[gstin] = {"party_name": cn.party_name, "taxable": 0.0, "cgst": 0.0, "sgst": 0.0, "igst": 0.0}
+        agg[gstin]["taxable"] -= float(cn.taxable_amount or 0)
+        agg[gstin]["cgst"] -= float(cn.cgst_amount or 0)
+        agg[gstin]["sgst"] -= float(cn.sgst_amount or 0)
+        agg[gstin]["igst"] -= float(cn.igst_amount or 0)
+
     result = []
     for gstin, vals in agg.items():
-        result.append({"gstin": gstin, **vals})
+        total = vals["taxable"] + vals["cgst"] + vals["sgst"] + vals["igst"]
+        result.append({"gstin": gstin, "total": total, **vals})
     return {"b2b": result}
+
 
 @router.get("/gst/hsn-summary")
 def get_hsn_summary(
@@ -395,11 +442,11 @@ def get_hsn_summary(
     q = (
         db.query(
             SalesBillItem.hsn_code.label("hsn_code"),
-            func.sum(SalesBillItem.quantity).label("total_qty"),
-            func.sum(SalesBillItem.taxable_amount).label("total_taxable"),
-            func.sum(SalesBillItem.cgst_amount).label("total_cgst"),
-            func.sum(SalesBillItem.sgst_amount).label("total_sgst"),
-            func.sum(SalesBillItem.igst_amount).label("total_igst"),
+            func.sum(SalesBillItem.qty).label("total_qty"),
+            func.sum(SalesBillItem.taxable_amt).label("total_taxable"),
+            func.sum(SalesBillItem.cgst_amt).label("total_cgst"),
+            func.sum(SalesBillItem.sgst_amt).label("total_sgst"),
+            func.sum(SalesBillItem.igst_amt).label("total_igst"),
         )
         .join(SalesBill, SalesBill.bill_id == SalesBillItem.bill_id)
         .filter(SalesBill.fy_code == fy_code)
@@ -412,15 +459,21 @@ def get_hsn_summary(
     rows = q.all()
     result = []
     for r in rows:
+        taxable = float(r.total_taxable or 0)
+        cgst = float(r.total_cgst or 0)
+        sgst = float(r.total_sgst or 0)
+        igst = float(r.total_igst or 0)
         result.append({
-            "hsn_code": r.hsn_code,
-            "total_qty": float(r.total_qty),
-            "total_taxable": float(r.total_taxable),
-            "total_cgst": float(r.total_cgst),
-            "total_sgst": float(r.total_sgst),
-            "total_igst": float(r.total_igst),
+            "hsn_code": r.hsn_code or "—",
+            "total_qty": float(r.total_qty or 0),
+            "total_taxable": taxable,
+            "total_cgst": cgst,
+            "total_sgst": sgst,
+            "total_igst": igst,
+            "total": taxable + cgst + sgst + igst,
         })
     return {"hsn_summary": result}
+
 
 @router.get("/gst/gstr3b-summary")
 def get_gstr3b_summary(
@@ -432,10 +485,10 @@ def get_gstr3b_summary(
     """GSTR‑3B summary calculations."""
     # Outward (sales + credit notes negative)
     sales_q = db.query(
-        func.coalesce(func.sum(SalesBill.taxable_amount), 0).label("taxable"),
-        func.coalesce(func.sum(SalesBill.cgst_amount), 0).label("cgst"),
-        func.coalesce(func.sum(SalesBill.sgst_amount), 0).label("sgst"),
-        func.coalesce(func.sum(SalesBill.igst_amount), 0).label("igst"),
+        func.coalesce(func.sum(SalesBill.taxable_amt), 0).label("taxable"),
+        func.coalesce(func.sum(SalesBill.cgst_amt), 0).label("cgst"),
+        func.coalesce(func.sum(SalesBill.sgst_amt), 0).label("sgst"),
+        func.coalesce(func.sum(SalesBill.igst_amt), 0).label("igst"),
     ).filter(SalesBill.fy_code == fy_code)
     if from_date:
         sales_q = sales_q.filter(SalesBill.bill_date >= from_date)
@@ -458,17 +511,29 @@ def get_gstr3b_summary(
     outward_sgst = float(s.sgst) - float(cn.sgst)
     outward_igst = float(s.igst) - float(cn.igst)
 
-    # Inward (purchase + debit notes negative)
-    pb_q = db.query(
-        func.coalesce(func.sum(PurchaseBill.cgst_amount), 0).label("cgst"),
-        func.coalesce(func.sum(PurchaseBill.sgst_amount), 0).label("sgst"),
-        func.coalesce(func.sum(PurchaseBill.igst_amount), 0).label("igst"),
-    ).filter(PurchaseBill.fy_code == fy_code)
+    # Inward — PurchaseBill has no tax-head columns of its own; recompute from line items
+    pb_q = db.query(PurchaseBill).options(joinedload(PurchaseBill.items)).filter(PurchaseBill.fy_code == fy_code)
     if from_date:
         pb_q = pb_q.filter(PurchaseBill.bill_date >= from_date)
     if to_date:
         pb_q = pb_q.filter(PurchaseBill.bill_date <= to_date)
-    pb = pb_q.one()
+    purchase_bills = pb_q.all()
+    clinic = db.query(ClinicSetup).first()
+    supplier_ids = {pb.supplier_id for pb in purchase_bills}
+    suppliers = {
+        sup.supplier_id: sup
+        for sup in db.query(Supplier).filter(Supplier.supplier_id.in_(supplier_ids)).all()
+    } if supplier_ids else {}
+
+    inward_cgst = Decimal("0.00")
+    inward_sgst = Decimal("0.00")
+    inward_igst = Decimal("0.00")
+    for pb in purchase_bills:
+        _, cgst, sgst, igst = _purchase_bill_tax_breakdown(pb, suppliers.get(pb.supplier_id), clinic)
+        inward_cgst += cgst
+        inward_sgst += sgst
+        inward_igst += igst
+
     dn_q = db.query(
         func.coalesce(func.sum(DebitNote.cgst_amount), 0).label("cgst"),
         func.coalesce(func.sum(DebitNote.sgst_amount), 0).label("sgst"),
@@ -479,9 +544,9 @@ def get_gstr3b_summary(
     if to_date:
         dn_q = dn_q.filter(DebitNote.voucher_date <= to_date)
     dn = dn_q.one()
-    inward_cgst_credit = float(pb.cgst) - float(dn.cgst)
-    inward_sgst_credit = float(pb.sgst) - float(dn.sgst)
-    inward_igst_credit = float(pb.igst) - float(dn.igst)
+    inward_cgst_credit = float(inward_cgst) - float(dn.cgst)
+    inward_sgst_credit = float(inward_sgst) - float(dn.sgst)
+    inward_igst_credit = float(inward_igst) - float(dn.igst)
 
     return {
         "outward_taxable": outward_taxable,
@@ -496,6 +561,7 @@ def get_gstr3b_summary(
         "net_igst_payable": outward_igst - inward_igst_credit,
     }
 
+
 @router.get("/gst/purchase-register")
 def get_purchase_register(
     fy_code: str = Query(...),
@@ -503,44 +569,63 @@ def get_purchase_register(
     to_date: Optional[date] = Query(None),
     db: Session = Depends(get_db),
 ):
-    """Purchase Register with debit notes as negative rows."""
-    pb_q = db.query(PurchaseBill).filter(PurchaseBill.fy_code == fy_code)
+    """Purchase Register with debit notes as negative rows.
+
+    PurchaseBill has no taxable/cgst/sgst/igst columns — recomputed from
+    PurchaseBillItem line data, see _purchase_bill_tax_breakdown above.
+    """
+    pb_q = db.query(PurchaseBill).options(joinedload(PurchaseBill.items)).filter(PurchaseBill.fy_code == fy_code)
     if from_date:
         pb_q = pb_q.filter(PurchaseBill.bill_date >= from_date)
     if to_date:
         pb_q = pb_q.filter(PurchaseBill.bill_date <= to_date)
     purchase_bills = pb_q.all()
+
+    clinic = db.query(ClinicSetup).first()
+    supplier_ids = {pb.supplier_id for pb in purchase_bills}
+    suppliers = {
+        sup.supplier_id: sup
+        for sup in db.query(Supplier).filter(Supplier.supplier_id.in_(supplier_ids)).all()
+    } if supplier_ids else {}
+
     dn_q = db.query(DebitNote).filter(DebitNote.fy_code == fy_code)
     if from_date:
         dn_q = dn_q.filter(DebitNote.voucher_date >= from_date)
     if to_date:
         dn_q = dn_q.filter(DebitNote.voucher_date <= to_date)
     debit_notes = dn_q.all()
+
     rows = []
     for pb in purchase_bills:
+        supplier = suppliers.get(pb.supplier_id)
+        taxable, cgst, sgst, igst = _purchase_bill_tax_breakdown(pb, supplier, clinic)
         rows.append({
             "date": pb.bill_date,
             "voucher_no": pb.bill_no,
-            "party_name": pb.supplier_name if hasattr(pb, "supplier_name") else None,
-            "gstin": getattr(pb, "gstin", None),
-            "taxable": float(pb.taxable_amount),
-            "cgst": float(pb.cgst_amount),
-            "sgst": float(pb.sgst_amount),
-            "igst": float(pb.igst_amount),
-            "total": float(pb.taxable_amount + pb.cgst_amount + pb.sgst_amount + pb.igst_amount),
+            "party_name": supplier.supplier_name if supplier else None,
+            "gstin": supplier.gstin if supplier else None,
+            "taxable": float(taxable),
+            "cgst": float(cgst),
+            "sgst": float(sgst),
+            "igst": float(igst),
+            "total": float(taxable + cgst + sgst + igst),
             "type": "purchase",
         })
     for dn in debit_notes:
+        taxable = dn.taxable_amount or Decimal("0.00")
+        cgst = dn.cgst_amount or Decimal("0.00")
+        sgst = dn.sgst_amount or Decimal("0.00")
+        igst = dn.igst_amount or Decimal("0.00")
         rows.append({
             "date": dn.voucher_date,
             "voucher_no": dn.voucher_no,
             "party_name": dn.party_name,
             "gstin": None,
-            "taxable": -float(dn.taxable_amount),
-            "cgst": -float(dn.cgst_amount),
-            "sgst": -float(dn.sgst_amount),
-            "igst": -float(dn.igst_amount),
-            "total": -float(dn.taxable_amount + dn.cgst_amount + dn.sgst_amount + dn.igst_amount),
+            "taxable": -float(taxable),
+            "cgst": -float(cgst),
+            "sgst": -float(sgst),
+            "igst": -float(igst),
+            "total": -float(taxable + cgst + sgst + igst),
             "type": "debit_note",
         })
     rows.sort(key=lambda r: r["date"])
@@ -669,16 +754,19 @@ def get_debtor_outstanding(
     If ``owner_id`` is provided, include detailed bill-level information.
     """
     # Base subquery aggregating per bill
+    # NOTE (2026-07-24): SalesBill has no `net_amount` column (that's PurchaseBill) —
+    # the actual "amount owed by the customer" column on SalesBill is `net_payable`.
+    # This previously raised AttributeError on every call.
     bill_subq = (
         db.query(
             SalesBill.owner_id.label("owner_id"),
             SalesBill.bill_id.label("bill_id"),
-            SalesBill.net_amount.label("net_amount"),
+            SalesBill.net_payable.label("net_amount"),
             func.coalesce(func.sum(ReceiptVoucherDetail.amount_received), 0).label("received"),
         )
         .outerjoin(ReceiptVoucherDetail, ReceiptVoucherDetail.bill_id == SalesBill.bill_id)
         .filter(SalesBill.fy_code == fy_code)
-        .group_by(SalesBill.owner_id, SalesBill.bill_id, SalesBill.net_amount)
+        .group_by(SalesBill.owner_id, SalesBill.bill_id, SalesBill.net_payable)
     ).subquery()
 
     # Aggregate per owner
@@ -696,7 +784,7 @@ def get_debtor_outstanding(
     query = (
         db.query(
             owner_agg.c.owner_id,
-            PetOwner.owner_name,
+            PetOwner.name.label("owner_name"),  # PetOwner has no `owner_name` column — real column is `name`
             owner_agg.c.total_billed,
             owner_agg.c.total_received,
             owner_agg.c.outstanding,

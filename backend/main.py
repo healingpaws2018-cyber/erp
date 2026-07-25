@@ -32,6 +32,7 @@ from routes.journal_vouchers import router as journal_vouchers_router
 from routes.credit_notes import router as credit_notes_router
 from routes.debit_notes import router as debit_notes_router
 from routes.reports import router as reports_router
+from routes.certificates import router as certificates_router
 
 # ─── Ensure Master Database Exists Before Creating Tables ─────────────────
 try:
@@ -295,6 +296,7 @@ app.include_router(journal_vouchers_router)
 app.include_router(credit_notes_router)
 app.include_router(debit_notes_router)
 app.include_router(reports_router)
+app.include_router(certificates_router)
 
 
 # ─── Health Check Endpoint ───────────────────────────────────────────────────

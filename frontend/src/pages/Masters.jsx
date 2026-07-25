@@ -416,21 +416,60 @@ function HsnTab() {
 function VaccineMasterTab() {
   const [data, setData]     = useState([])
   const [species, setSpecies] = useState([])
+  const [medicines, setMedicines] = useState([])
+  const [hsnCodes, setHsn]  = useState([])
+  const [gstRates, setGst]  = useState([])
+  const [hsnQuickModal, setHsnQuickModal] = useState(false)
   const [modal, setModal]   = useState(false)
   const [editing, setEditing] = useState(null)
   const [saving, setSaving] = useState(false)
-  const blank = { vaccine_name: '', species_id: '', disease: '', interval_days: '', dosage: '', company: '' }
+  const blank = { vaccine_name: '', species_id: '', disease: '', interval_days: '', dosage: '', company: '', medicine_id: '', hsn_id: '', gst_rate_id: '' }
   const [form, setForm]     = useState(blank)
 
+  // Batch state — batches belong to the vaccine's LINKED MEDICINE, not the vaccine
+  // itself, so these mirror MedicineMasterTab's batch panel exactly.
+  const [batches, setBatches]             = useState([])
+  const [batchSaving, setBatchSaving]     = useState(false)
+  const [showBatchForm, setShowBatchForm] = useState(false)
+  const blankBatch = { batch_no: '', mfg_date: '', expiry_date: '', purchase_price: '', sale_price: '', mrp: '', opening_qty: '0' }
+  const [batchForm, setBatchForm]         = useState(blankBatch)
+  const [batchesLoading, setBatchesLoading] = useState(false)
+  const [editingBatch, setEditingBatch]           = useState(null)
+  const [showEditBatchForm, setShowEditBatchForm] = useState(false)
+  const [editBatchForm, setEditBatchForm]         = useState(blankBatch)
+  const [editBatchSaving, setEditBatchSaving]     = useState(false)
+
+  const currentStock = batches.reduce((sum, b) => sum + Number(b.current_qty || 0), 0)
+
   const load = () => api.get('/vaccines').then(r => setData(r.data)).catch(() => {})
+  const loadHsn = () => api.get('/masters/hsn').then(r => setHsn(r.data)).catch(() => {})
+  const loadMedicines = () => api.get('/inventory/medicines').then(r => setMedicines(r.data)).catch(() => {})
+  const loadBatches = (medicineId) => {
+    if (!medicineId) { setBatches([]); return }
+    setBatchesLoading(true)
+    api.get(`/inventory/batches/${medicineId}`)
+      .then(r => setBatches(r.data))
+      .catch(() => setBatches([]))
+      .finally(() => setBatchesLoading(false))
+  }
+
   useEffect(() => {
     load()
     api.get('/masters/species').then(r => setSpecies(r.data)).catch(() => {})
+    loadMedicines()
+    loadHsn()
+    api.get('/masters/gst-rates').then(r => setGst(r.data)).catch(() => {})
   }, [])
 
   const speciesMap = Object.fromEntries(species.map(s => [s.species_id, s.species_name]))
+  const medicineMap = Object.fromEntries(medicines.map(m => [m.medicine_id, m.medicine_name]))
 
-  const openAdd  = () => { setEditing(null); setForm(blank); setModal(true) }
+  const openAdd  = () => {
+    setEditing(null); setForm(blank)
+    setBatches([]); setBatchForm(blankBatch); setShowBatchForm(false)
+    setEditingBatch(null); setShowEditBatchForm(false)
+    setModal(true)
+  }
   const openEdit = row => {
     setEditing(row)
     setForm({
@@ -440,7 +479,13 @@ function VaccineMasterTab() {
       interval_days: row.interval_days || '',
       dosage:        row.dosage        || '',
       company:       row.company       || '',
+      medicine_id:   row.medicine_id   || '',
+      hsn_id:        row.hsn_id        || '',
+      gst_rate_id:   row.gst_rate_id   || '',
     })
+    setBatchForm(blankBatch); setShowBatchForm(false)
+    setEditingBatch(null); setShowEditBatchForm(false)
+    loadBatches(row.medicine_id)
     setModal(true)
   }
 
@@ -449,15 +494,114 @@ function VaccineMasterTab() {
     if (!form.vaccine_name || !form.species_id) return toast.error('Vaccine name and species required')
     setSaving(true)
     try {
-      const payload = { ...form, species_id: Number(form.species_id), interval_days: Number(form.interval_days) || 0 }
-      if (editing) await api.put(`/vaccines/${editing.vaccine_id}`, payload)
-      else         await api.post('/vaccines', payload)
-      toast.success('Saved!'); setModal(false); load()
+      const payload = {
+        ...form,
+        species_id: Number(form.species_id),
+        interval_days: Number(form.interval_days) || 0,
+        medicine_id: form.medicine_id ? Number(form.medicine_id) : null,
+        hsn_id: form.hsn_id ? Number(form.hsn_id) : null,
+        gst_rate_id: form.gst_rate_id ? Number(form.gst_rate_id) : null,
+      }
+      const wasAlreadyLinked = editing && editing.medicine_id
+      let res
+      if (editing) {
+        res = await api.put(`/vaccines/${editing.vaccine_id}`, payload)
+        toast.success(wasAlreadyLinked ? 'Vaccine updated!' : 'Vaccine updated! Auto-linked to a billable Medicine — add batches below.')
+      } else {
+        res = await api.post('/vaccines', payload)
+        toast.success('Vaccine added! Add opening batches below to make it billable.')
+      }
+      const saved = res.data
+      setEditing(saved)          // switches the form to "edit mode" so the batch panel shows
+      loadBatches(saved.medicine_id)
+      load()
+      loadMedicines()             // refresh so a newly auto-created item shows up
+      // modal stays open — batches can be added right away, close manually when done
     } catch (err) { toast.error(err.response?.data?.detail || 'Error') }
     finally { setSaving(false) }
   }
 
+  const handleAddBatch = async e => {
+    e.preventDefault()
+    if (!editing?.medicine_id) return toast.error('Save the vaccine first')
+    if (!batchForm.batch_no) return toast.error('Batch number is required')
+    if (!batchForm.expiry_date) return toast.error('Expiry date is required')
+    setBatchSaving(true)
+    try {
+      await api.post('/inventory/batches', {
+        medicine_id:    editing.medicine_id,
+        batch_no:       batchForm.batch_no,
+        mfg_date:       batchForm.mfg_date || null,
+        expiry_date:    batchForm.expiry_date,
+        purchase_price: parseFloat(batchForm.purchase_price) || 0,
+        sale_price:     parseFloat(batchForm.sale_price)     || 0,
+        mrp:            parseFloat(batchForm.mrp)            || 0,
+        opening_qty:    parseFloat(batchForm.opening_qty)    || 0,
+        source:         'Opening'
+      })
+      toast.success(`Batch ${batchForm.batch_no} added!`)
+      setBatchForm(blankBatch)
+      setShowBatchForm(false)
+      loadBatches(editing.medicine_id)
+    } catch (err) { toast.error(err.response?.data?.detail || 'Error adding batch') }
+    finally { setBatchSaving(false) }
+  }
+
+  const openEditBatch = (b) => {
+    setEditingBatch(b)
+    setEditBatchForm({
+      batch_no:       b.batch_no,
+      mfg_date:       b.mfg_date   || '',
+      expiry_date:    b.expiry_date || '',
+      purchase_price: String(b.purchase_price),
+      sale_price:     String(b.sale_price),
+      mrp:            String(b.mrp),
+      opening_qty:    String(b.opening_qty),
+    })
+    setShowBatchForm(false)
+    setShowEditBatchForm(true)
+  }
+
+  const handleEditBatch = async e => {
+    e.preventDefault()
+    if (!editBatchForm.batch_no) return toast.error('Batch number is required')
+    if (!editBatchForm.expiry_date) return toast.error('Expiry date is required')
+    setEditBatchSaving(true)
+    try {
+      await api.put(`/inventory/batches/${editingBatch.batch_id}`, {
+        batch_no:       editBatchForm.batch_no,
+        mfg_date:       editBatchForm.mfg_date   || null,
+        expiry_date:    editBatchForm.expiry_date,
+        purchase_price: parseFloat(editBatchForm.purchase_price) || 0,
+        sale_price:     parseFloat(editBatchForm.sale_price)     || 0,
+        mrp:            parseFloat(editBatchForm.mrp)            || 0,
+        opening_qty:    parseFloat(editBatchForm.opening_qty)    || 0,
+      })
+      toast.success(`Batch ${editBatchForm.batch_no} updated!`)
+      setShowEditBatchForm(false)
+      setEditingBatch(null)
+      loadBatches(editing.medicine_id)
+    } catch (err) { toast.error(err.response?.data?.detail || 'Error updating batch') }
+    finally { setEditBatchSaving(false) }
+  }
+
+  const handleDeleteBatch = async (b) => {
+    if (!confirm(`Delete batch "${b.batch_no}"? This will reverse ${Number(b.current_qty)} units from stock. This cannot be undone.`)) return
+    try {
+      await api.delete(`/inventory/batches/${b.batch_id}`)
+      toast.success(`Batch ${b.batch_no} deleted`)
+      loadBatches(editing.medicine_id)
+    } catch (err) { toast.error(err.response?.data?.detail || 'Error deleting batch') }
+  }
+
+  // Called when a new HSN is created via the quick modal
+  const handleHsnCreated = (newHsn) => {
+    setHsn(prev => [...prev, newHsn].sort((a, b) => a.hsn_code.localeCompare(b.hsn_code)))
+    setForm(f => ({ ...f, hsn_id: String(newHsn.hsn_id) }))
+  }
+
   const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }))
+  const setBF = k => e => setBatchForm(f => ({ ...f, [k]: e.target.value }))
 
   return (
     <>
@@ -477,6 +621,7 @@ function VaccineMasterTab() {
           { key: 'interval_days', label: 'Interval (Days)', render: v => v ? `${v} days` : '—' },
           { key: 'dosage',        label: 'Dosage' },
           { key: 'company',       label: 'Company' },
+          { key: 'medicine_id',   label: 'Linked Medicine (Billing)', render: v => v ? (medicineMap[v] || `#${v}`) : '— Not linked —' },
         ]}
         data={data}
         actions={row => (
@@ -484,43 +629,313 @@ function VaccineMasterTab() {
         )}
         emptyText="No vaccines added yet. Click 'Add Vaccine' to create the first entry."
       />
-      <FormModal isOpen={modal} onClose={() => setModal(false)} title={editing ? 'Edit Vaccine' : 'Add Vaccine Master'}>
-        <form onSubmit={handleSave} className="space-y-4">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="col-span-2">
-              <label className="label">Vaccine Name *</label>
-              <input className="input-field" value={form.vaccine_name} onChange={set('vaccine_name')} placeholder="Rabies, Parvovirus..." autoFocus />
+      {/* Wide modal — room for the batch panel once the vaccine is linked to a Medicine */}
+      {modal && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-y-auto" style={{ background: 'rgba(15,23,42,0.45)' }}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl my-6 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+              <div>
+                <h2 className="font-semibold text-slate-800">{editing ? 'Edit Vaccine' : 'Add Vaccine Master'}</h2>
+                {editing && <p className="text-xs text-slate-400 mt-0.5">Code: {editing.vaccine_code}</p>}
+              </div>
+              <button onClick={() => setModal(false)} className="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
             </div>
-            <div>
-              <label className="label">Species *</label>
-              <select className="input-field" value={form.species_id} onChange={set('species_id')}>
-                <option value="">Select Species</option>
-                {species.map(s => <option key={s.species_id} value={s.species_id}>{s.species_name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="label">Interval (Days)</label>
-              <input className="input-field" type="number" value={form.interval_days} onChange={set('interval_days')} placeholder="365" />
-            </div>
-            <div>
-              <label className="label">Disease Covered</label>
-              <input className="input-field" value={form.disease} onChange={set('disease')} placeholder="Rabies, Distemper..." />
-            </div>
-            <div>
-              <label className="label">Dosage</label>
-              <input className="input-field" value={form.dosage} onChange={set('dosage')} placeholder="1 ml, 2 ml..." />
-            </div>
-            <div className="col-span-2">
-              <label className="label">Manufacturer / Company</label>
-              <input className="input-field" value={form.company} onChange={set('company')} placeholder="Zoetis, MSD..." />
+
+            <div className="p-6 space-y-6">
+              <form onSubmit={handleSave} className="space-y-4" id="vaccine-form">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="col-span-2">
+                    <label className="label">Vaccine Name *</label>
+                    <input className="input-field" value={form.vaccine_name} onChange={set('vaccine_name')} placeholder="Rabies, Parvovirus..." autoFocus />
+                  </div>
+                  <div>
+                    <label className="label">Species *</label>
+                    <select className="input-field" value={form.species_id} onChange={set('species_id')}>
+                      <option value="">Select Species</option>
+                      {species.map(s => <option key={s.species_id} value={s.species_id}>{s.species_name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="label">Interval (Days)</label>
+                    <input className="input-field" type="number" value={form.interval_days} onChange={set('interval_days')} placeholder="365" />
+                  </div>
+                  <div>
+                    <label className="label">Disease Covered</label>
+                    <input className="input-field" value={form.disease} onChange={set('disease')} placeholder="Rabies, Distemper..." />
+                  </div>
+                  <div>
+                    <label className="label">Dosage</label>
+                    <input className="input-field" value={form.dosage} onChange={set('dosage')} placeholder="1 ml, 2 ml..." />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="label">Manufacturer / Company</label>
+                    <input className="input-field" value={form.company} onChange={set('company')} placeholder="Zoetis, MSD..." />
+                  </div>
+
+                  <div className="col-span-2 pt-2 border-t border-slate-100">
+                    <p className="text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Billing Setup</p>
+                    <p className="text-xs text-slate-400 mb-3">
+                      Set the HSN &amp; GST rate here and this vaccine is auto-created as a billable Medicine on Save —
+                      no separate trip to Masters → Medicines needed. Opening stock can be added right below, once saved.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="label">HSN Code</label>
+                    <div className="flex gap-1.5 items-center">
+                      <select className="input-field flex-1" value={form.hsn_id} onChange={set('hsn_id')}>
+                        <option value="">Select HSN</option>
+                        {hsnCodes.map(h => <option key={h.hsn_id} value={h.hsn_id}>{h.hsn_code} – {h.description}</option>)}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => setHsnQuickModal(true)}
+                        title="Add new HSN code"
+                        className="shrink-0 flex items-center gap-1 px-2.5 py-2 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 text-xs font-semibold transition-colors"
+                      >
+                        <Plus size={13} /> HSN
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="label">GST Rate</label>
+                    <select className="input-field" value={form.gst_rate_id} onChange={set('gst_rate_id')}>
+                      <option value="">Select Rate</option>
+                      {gstRates.map(g => <option key={g.gst_rate_id} value={g.gst_rate_id}>{g.rate_name} ({g.gst_percent}%)</option>)}
+                    </select>
+                  </div>
+
+                  <div className="col-span-2">
+                    <label className="label">Or Link to an Existing Medicine (optional override)</label>
+                    <select className="input-field" value={form.medicine_id} onChange={set('medicine_id')}>
+                      <option value="">— Leave blank to auto-create from HSN/GST above —</option>
+                      {medicines.map(m => <option key={m.medicine_id} value={m.medicine_id}>{m.medicine_name}</option>)}
+                    </select>
+                    <p className="text-xs text-slate-400 mt-1">
+                      Only needed if this vaccine should reuse an item you already track in Masters → Medicines, instead of getting its own.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center justify-end pt-2 border-t border-slate-100">
+                  <div className="flex gap-3">
+                    <button type="button" onClick={() => setModal(false)} className="btn-secondary">{editing ? 'Close' : 'Cancel'}</button>
+                    <button type="submit" disabled={saving} className="btn-primary">{saving ? 'Saving...' : editing ? 'Update Vaccine' : 'Save & Add Batches'}</button>
+                  </div>
+                </div>
+              </form>
+
+              {/* ── BATCH PANEL (shown once this vaccine has a linked Medicine) ── */}
+              {editing?.medicine_id && (
+                <div className="border-t border-slate-100 pt-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                        <span className="inline-block w-2 h-2 rounded-full bg-indigo-500"></span>
+                        Batch Numbers
+                        <span className="text-slate-400 font-normal">({batches.length} batch{batches.length !== 1 ? 'es' : ''})</span>
+                      </h3>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        Stock for {medicineMap[editing.medicine_id] || 'the linked Medicine'} — add batches with opening qty; stock &amp; inventory update instantly.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className={`text-center px-4 py-1.5 rounded-xl border-2 ${
+                        batchesLoading
+                          ? 'border-slate-200 bg-slate-50'
+                          : currentStock <= 0
+                            ? 'border-red-200 bg-red-50'
+                            : 'border-emerald-200 bg-emerald-50'
+                      }`}>
+                        <div className={`text-xl font-extrabold leading-none ${
+                          batchesLoading ? 'text-slate-400'
+                          : currentStock <= 0 ? 'text-red-600'
+                          : 'text-emerald-600'
+                        }`}>{batchesLoading ? '…' : currentStock}</div>
+                        <div className="text-[10px] text-slate-500 font-medium mt-0.5 uppercase tracking-wide">
+                          {batchesLoading ? 'Loading' : 'In Stock'}
+                        </div>
+                      </div>
+                      {!showBatchForm && (
+                        <button
+                          type="button"
+                          onClick={() => setShowBatchForm(true)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
+                        >
+                          <Plus size={13} /> Add Batch
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {batches.length > 0 && (
+                    <div className="rounded-xl border border-slate-100 overflow-hidden mb-4">
+                      <table className="w-full text-xs">
+                        <thead className="bg-slate-50">
+                          <tr>
+                            <th className="text-left py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Batch No</th>
+                            <th className="text-left py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Mfg Date</th>
+                            <th className="text-left py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Expiry</th>
+                            <th className="text-right py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Pur. Price</th>
+                            <th className="text-right py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Sale Price</th>
+                            <th className="text-right py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">MRP</th>
+                            <th className="text-right py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Qty</th>
+                            <th className="text-left py-2 px-3 text-slate-400 font-semibold uppercase tracking-wide">Source</th>
+                            <th className="py-2 px-3"></th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50">
+                          {batches.map(b => {
+                            const isExpired = b.expiry_date && new Date(b.expiry_date) < new Date()
+                            const isNearExpiry = b.expiry_date && !isExpired && (new Date(b.expiry_date) - new Date()) < 90*24*60*60*1000
+                            const isBeingEdited = editingBatch?.batch_id === b.batch_id
+                            return (
+                              <tr key={b.batch_id} className={`hover:bg-slate-50 ${isBeingEdited ? 'bg-amber-50' : ''}`}>
+                                <td className="py-2 px-3 font-semibold text-indigo-700">{b.batch_no}</td>
+                                <td className="py-2 px-3 text-slate-500">{b.mfg_date || '—'}</td>
+                                <td className="py-2 px-3">
+                                  <span className={`font-medium ${
+                                    isExpired ? 'text-red-600' : isNearExpiry ? 'text-amber-600' : 'text-slate-600'
+                                  }`}>{b.expiry_date}</span>
+                                  {isExpired && <span className="ml-1 px-1 bg-red-100 text-red-600 rounded text-[10px]">Expired</span>}
+                                  {isNearExpiry && !isExpired && <span className="ml-1 px-1 bg-amber-100 text-amber-600 rounded text-[10px]">Near</span>}
+                                </td>
+                                <td className="py-2 px-3 text-right text-slate-600">{Number(b.purchase_price).toFixed(2)}</td>
+                                <td className="py-2 px-3 text-right text-slate-600">{Number(b.sale_price).toFixed(2)}</td>
+                                <td className="py-2 px-3 text-right font-semibold text-slate-700">{Number(b.mrp).toFixed(2)}</td>
+                                <td className="py-2 px-3 text-right">
+                                  <span className={`font-bold ${Number(b.current_qty) <= 0 ? 'text-red-500' : 'text-emerald-600'}`}>
+                                    {Number(b.current_qty)}
+                                  </span>
+                                </td>
+                                <td className="py-2 px-3">
+                                  <span className="px-1.5 py-0.5 bg-slate-100 text-slate-500 rounded text-[10px]">{b.source}</span>
+                                </td>
+                                <td className="py-2 px-3">
+                                  <div className="flex gap-1 justify-end">
+                                    <button type="button" onClick={() => openEditBatch(b)} className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors" title="Edit batch">
+                                      <Pencil size={12} />
+                                    </button>
+                                    <button type="button" onClick={() => handleDeleteBatch(b)} className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors" title="Delete batch">
+                                      <Trash2 size={12} />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {batches.length === 0 && !showBatchForm && !showEditBatchForm && (
+                    <div className="text-center py-6 text-slate-400 text-sm border border-dashed border-slate-200 rounded-xl">
+                      No batches yet. Click "Add Batch" to add opening stock.
+                    </div>
+                  )}
+
+                  {showBatchForm && (
+                    <form onSubmit={handleAddBatch} className="bg-indigo-50 border border-indigo-100 rounded-xl p-4 space-y-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <h4 className="text-xs font-bold text-indigo-700 uppercase tracking-wide">New Batch Entry</h4>
+                        <button type="button" onClick={() => { setShowBatchForm(false); setBatchForm(blankBatch) }} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="col-span-1">
+                          <label className="label text-indigo-700">Batch No *</label>
+                          <input className="input-field" value={batchForm.batch_no} onChange={setBF('batch_no')} placeholder="e.g. BT2024001" autoFocus />
+                        </div>
+                        <div>
+                          <label className="label text-indigo-700">Mfg Date</label>
+                          <input className="input-field" type="date" value={batchForm.mfg_date} onChange={setBF('mfg_date')} />
+                        </div>
+                        <div>
+                          <label className="label text-indigo-700">Expiry Date *</label>
+                          <input className="input-field" type="date" value={batchForm.expiry_date} onChange={setBF('expiry_date')} />
+                        </div>
+                        <div>
+                          <label className="label text-indigo-700">Purchase Price</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={batchForm.purchase_price} onChange={setBF('purchase_price')} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="label text-indigo-700">Sale Price</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={batchForm.sale_price} onChange={setBF('sale_price')} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="label text-indigo-700">MRP</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={batchForm.mrp} onChange={setBF('mrp')} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="label text-indigo-700">Opening Qty</label>
+                          <input className="input-field font-semibold" type="number" step="0.01" min="0" value={batchForm.opening_qty} onChange={setBF('opening_qty')} placeholder="0" />
+                          <p className="text-[10px] text-indigo-500 mt-1">Updates stock &amp; inventory on save</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 justify-end pt-1">
+                        <button type="button" onClick={() => { setShowBatchForm(false); setBatchForm(blankBatch) }} className="btn-secondary text-xs">Cancel</button>
+                        <button type="submit" disabled={batchSaving} className="btn-primary text-xs">{batchSaving ? 'Adding...' : 'Add Batch'}</button>
+                      </div>
+                    </form>
+                  )}
+
+                  {showEditBatchForm && editingBatch && (
+                    <form onSubmit={handleEditBatch} className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <div>
+                          <h4 className="text-xs font-bold text-amber-700 uppercase tracking-wide">Edit Batch — {editingBatch.batch_no}</h4>
+                          <p className="text-[10px] text-amber-600 mt-0.5">Changing Opening Qty will post an adjustment to the stock ledger</p>
+                        </div>
+                        <button type="button" onClick={() => { setShowEditBatchForm(false); setEditingBatch(null) }} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="col-span-1">
+                          <label className="label text-amber-700">Batch No *</label>
+                          <input className="input-field" value={editBatchForm.batch_no} onChange={e => setEditBatchForm(f => ({ ...f, batch_no: e.target.value }))} autoFocus />
+                        </div>
+                        <div>
+                          <label className="label text-amber-700">Mfg Date</label>
+                          <input className="input-field" type="date" value={editBatchForm.mfg_date} onChange={e => setEditBatchForm(f => ({ ...f, mfg_date: e.target.value }))} />
+                        </div>
+                        <div>
+                          <label className="label text-amber-700">Expiry Date *</label>
+                          <input className="input-field" type="date" value={editBatchForm.expiry_date} onChange={e => setEditBatchForm(f => ({ ...f, expiry_date: e.target.value }))} />
+                        </div>
+                        <div>
+                          <label className="label text-amber-700">Purchase Price</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={editBatchForm.purchase_price} onChange={e => setEditBatchForm(f => ({ ...f, purchase_price: e.target.value }))} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="label text-amber-700">Sale Price</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={editBatchForm.sale_price} onChange={e => setEditBatchForm(f => ({ ...f, sale_price: e.target.value }))} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="label text-amber-700">MRP</label>
+                          <input className="input-field" type="number" step="0.01" min="0" value={editBatchForm.mrp} onChange={e => setEditBatchForm(f => ({ ...f, mrp: e.target.value }))} placeholder="0.00" />
+                        </div>
+                        <div>
+                          <label className="label text-amber-700">Opening Qty</label>
+                          <input className="input-field font-semibold" type="number" step="0.01" min="0" value={editBatchForm.opening_qty} onChange={e => setEditBatchForm(f => ({ ...f, opening_qty: e.target.value }))} />
+                          <p className="text-[10px] text-amber-600 mt-1">Delta from original ({editingBatch.opening_qty}) posts as stock adjustment</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 justify-end pt-1 border-t border-amber-200">
+                        <button type="button" onClick={() => { setShowEditBatchForm(false); setEditingBatch(null) }} className="btn-secondary text-xs">Cancel</button>
+                        <button type="submit" disabled={editBatchSaving} className="flex items-center gap-1.5 px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-xs font-bold disabled:opacity-60 transition-colors">
+                          {editBatchSaving ? 'Saving...' : 'Update Batch'}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </div>
+              )}
             </div>
           </div>
-          <div className="flex gap-3 justify-end pt-2 border-t border-slate-100">
-            <button type="button" onClick={() => setModal(false)} className="btn-secondary">Cancel</button>
-            <button type="submit" disabled={saving} className="btn-primary">{saving ? 'Saving...' : 'Save'}</button>
-          </div>
-        </form>
-      </FormModal>
+        </div>
+      )}
+      <AddHsnQuickModal
+        isOpen={hsnQuickModal}
+        onClose={() => setHsnQuickModal(false)}
+        onCreated={handleHsnCreated}
+      />
     </>
   )
 }

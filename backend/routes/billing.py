@@ -1,3 +1,4 @@
+from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
@@ -6,13 +7,85 @@ from models.stage3 import SalesBill, SalesBillItem, Medicine, MedicineBatch, Pro
 from models.people import PetOwner
 from models.masters import GstRate
 from models.clinic import ClinicSetup
+from models.accounts import GLPosting
 from schemas.billing import SalesBillCreate, SalesBillOut
 from utils.billing import calculate_line_item, calculate_bill_totals
 from utils.stock import post_stock_ledger
 from utils.doc_sequence import get_next_doc_no
+from utils.gl_utils import create_gl_account, get_gl_by_code, get_current_fy
 from models.users import User
 
 router = APIRouter(prefix="/billing/sales", tags=["Billing"])
+
+
+def _post_sales_bill_to_gl(db: Session, bill: SalesBill, owner: PetOwner, processed_lines: list, totals: dict):
+    """Post a confirmed Sales Bill to the General Ledger.
+
+    DR the owner's Debtor account for the full amount owed (net_payable), CR Sales
+    revenue (split Medicine vs Procedure lines into SALES-MED / SALES-VET so P&L can
+    tell them apart) and CR the GST payable accounts for the tax collected. Any
+    rounding difference (net_payable is rounded to the nearest rupee, the revenue/tax
+    legs aren't) is folded into the revenue leg so the entry balances exactly.
+
+    Silently skips (no GL posting, bill still saves) if there's no owner or no active
+    Financial Year configured — see chart_of_accounts.md project memory for why this is
+    a known limitation rather than a hard failure.
+    """
+    if not owner:
+        return
+    fy = get_current_fy(db)
+    if not fy:
+        return
+
+    if not owner.gl_account_id:
+        owner.gl_account_id = create_gl_account("owner", owner.name, db)
+        db.flush()
+
+    med_taxable = sum(Decimal(str(l["taxable_amt"])) for l in processed_lines if l["line_type"] == "Medicine")
+    proc_taxable = sum(Decimal(str(l["taxable_amt"])) for l in processed_lines if l["line_type"] == "Procedure")
+    cgst_amt = Decimal(str(totals.get("cgst_amt", 0)))
+    sgst_amt = Decimal(str(totals.get("sgst_amt", 0)))
+    igst_amt = Decimal(str(totals.get("igst_amt", 0)))
+    round_off = Decimal(str(totals.get("round_off", 0)))
+    net_payable = Decimal(str(totals.get("net_payable", 0)))
+
+    if net_payable == 0:
+        return
+
+    # Fold the rounding difference into whichever revenue leg is in use so DR == CR exactly.
+    if med_taxable != 0:
+        med_taxable += round_off
+    elif proc_taxable != 0:
+        proc_taxable += round_off
+    else:
+        med_taxable += round_off
+
+    def _gl_or_raise(code: str) -> int:
+        gl_id = get_gl_by_code(db, code)
+        if not gl_id:
+            raise HTTPException(500, f"GL account '{code}' not found — check Chart of Accounts setup (see migrations/seed_gl_master.sql)")
+        return gl_id
+
+    common = dict(fy_code=fy.fy_code, posting_date=bill.bill_date, voucher_type="SalesBill",
+                  voucher_no=bill.bill_number, voucher_ref_id=bill.bill_id, narration=f"Sales Bill {bill.bill_number}")
+
+    db.add(GLPosting(**common, gl_id=owner.gl_account_id, dr_amount=net_payable, cr_amount=0))
+    if med_taxable > 0:
+        db.add(GLPosting(**common, gl_id=_gl_or_raise("SALES-MED"), dr_amount=0, cr_amount=med_taxable))
+    if proc_taxable > 0:
+        db.add(GLPosting(**common, gl_id=_gl_or_raise("SALES-VET"), dr_amount=0, cr_amount=proc_taxable))
+    if cgst_amt > 0:
+        db.add(GLPosting(**common, gl_id=_gl_or_raise("GST-CGST-PAY"), dr_amount=0, cr_amount=cgst_amt))
+    if sgst_amt > 0:
+        db.add(GLPosting(**common, gl_id=_gl_or_raise("GST-SGST-PAY"), dr_amount=0, cr_amount=sgst_amt))
+    if igst_amt > 0:
+        db.add(GLPosting(**common, gl_id=_gl_or_raise("GST-IGST-PAY"), dr_amount=0, cr_amount=igst_amt))
+
+    bill.fy_code = fy.fy_code
+
+
+def _reverse_sales_bill_gl(db: Session, bill_id: int):
+    db.query(GLPosting).filter(GLPosting.voucher_type == "SalesBill", GLPosting.voucher_ref_id == bill_id).delete()
 
 
 def _valid_created_by(db: Session):
@@ -116,6 +189,8 @@ def confirm_sales_bill(data: SalesBillCreate, db: Session = Depends(get_db)):
                 created_by=created_by
             )
 
+    _post_sales_bill_to_gl(db, bill, owner, processed_lines, totals)
+
     db.commit()
     db.refresh(bill)
     return bill
@@ -165,10 +240,11 @@ def update_sales_bill(bill_id: int, data: SalesBillCreate, db: Session = Depends
             med = db.query(Medicine).filter_by(medicine_id=item.medicine_id).first()
             if med: med.current_stock += item.qty
     
-    # Delete old items and ledger
+    # Delete old items, ledger, and GL postings — re-posted fresh below from the new totals
     db.query(SalesBillItem).filter(SalesBillItem.bill_id == bill_id).delete()
     db.query(StockLedger).filter(StockLedger.ref_type == "SalesBill", StockLedger.ref_id == bill_id).delete()
-    
+    _reverse_sales_bill_gl(db, bill_id)
+
     # 2. APPLY NEW DATA (Same as POST but keep bill_id/bill_number)
     clinic = db.query(ClinicSetup).first()
     owner = db.query(PetOwner).filter(PetOwner.owner_id == data.owner_id).first()
@@ -217,6 +293,8 @@ def update_sales_bill(bill_id: int, data: SalesBillCreate, db: Session = Depends
         if item.line_type == 'Medicine':
             post_stock_ledger(db, item.medicine_id, item.batch_id, txn_type="SALE", qty=item.qty, ref_type="SalesBill", ref_id=bill.bill_id, ref_number=bill.bill_number, created_by=_valid_created_by(db))
 
+    _post_sales_bill_to_gl(db, bill, owner, processed_lines, totals)
+
     db.commit()
     db.refresh(bill)
     return bill
@@ -235,6 +313,7 @@ def delete_sales_bill(bill_id: int, db: Session = Depends(get_db)):
             if med: med.current_stock += item.qty
                 
     db.query(StockLedger).filter(StockLedger.ref_type == "SalesBill", StockLedger.ref_id == bill_id).delete()
+    _reverse_sales_bill_gl(db, bill_id)
     db.delete(bill)
     db.commit()
     return {"message": "Sales bill deleted"}

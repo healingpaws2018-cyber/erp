@@ -1,5 +1,6 @@
+from typing import Optional
 from sqlalchemy.orm import Session
-from models.phase4 import GLMaster
+from models.phase4 import GLMaster, FinancialYear
 from utils.doc_sequence import get_next_doc_no
 
 GL_GROUP_MAP = {
@@ -55,3 +56,23 @@ def create_gl_account(entity_type: str, name: str, db: Session, **kwargs) -> int
     db.add(gl)
     db.flush()   # get gl_id without committing
     return gl.gl_id
+
+
+def get_gl_by_code(db: Session, code: str) -> Optional[int]:
+    """Look up a system GL account's gl_id by its gl_code (e.g. 'SALES-MED', 'GST-CGST-PAY').
+
+    Shared by any module that auto-posts to gl_postings using the well-known
+    account codes seeded in migrations/seed_gl_master.sql.
+    """
+    gl = db.query(GLMaster).filter(GLMaster.gl_code == code).first()
+    return gl.gl_id if gl else None
+
+
+def get_current_fy(db: Session) -> Optional[FinancialYear]:
+    """Return the FinancialYear row currently flagged is_current, or None if none is set up.
+
+    Same lookup used by the EOY rollover in routes/companies.py. Any module that posts to
+    gl_postings needs a fy_code (the column is NOT NULL) — this is the one place that
+    resolves "what FY are we in" so callers don't each reimplement it differently.
+    """
+    return db.query(FinancialYear).filter(FinancialYear.is_current == True).first()

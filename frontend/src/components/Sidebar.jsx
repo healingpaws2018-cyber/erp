@@ -5,9 +5,10 @@ import {
   CalendarDays, ClipboardList, Syringe, Pill,
   Package, ShoppingCart, Receipt,
   BookOpen, Handshake, UserCog, Building2,
-  CreditCard, Banknote,
+  CreditCard, Banknote, HeartPulse,
   Stethoscope as StethoscopeIcon
 } from 'lucide-react'
+import { ROUTE_MODULE_MAP, hasViewAccess } from '../constants/permissions'
 
 const navGroups = [
   {
@@ -18,7 +19,7 @@ const navGroups = [
     ]
   },
   {
-    label: '📦 Phase 1 — Masters',
+    label: 'Masters',
     badge: 'LIVE',
     items: [
       { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
@@ -34,17 +35,17 @@ const navGroups = [
       { to: '/users', icon: UserCog, label: 'User Management' },
     ]
   },
-  // ─── FUTURE PHASES ───
   {
-    label: 'Phase 2 — Clinical',
+    label: 'Clinical',
     items: [
       { to: '/appointments',   icon: CalendarDays,   label: 'Appointments' },
       { to: '/consultations',  icon: ClipboardList,  label: 'Consultations' },
       { to: '/procedures',     icon: StethoscopeIcon,    label: 'Procedures' },
+      { to: '/pet-book',       icon: HeartPulse,     label: 'Pet Book' },
     ]
   },
   {
-    label: 'Phase 3 — Pharmacy & Stock',
+    label: 'Pharmacy & Stock',
     items: [
       { to: '/sales-billing', icon: Receipt,      label: 'Sales Billing' },
       { to: '/purchases',     icon: ShoppingCart, label: 'Purchases' },
@@ -52,14 +53,9 @@ const navGroups = [
     ]
   },
   {
-    label: 'Phase 4 — Accounts',
-    items: [
-      { to: '/ledger',       icon: BookOpen,     label: 'Chart of Accounts' },
-    ]
-  },
-  {
     label: 'Accounts',
     items: [
+      { to: '/ledger',                    icon: BookOpen,        label: 'Chart of Accounts' },
       { to: '/accounts/advance-payments', icon: CreditCard,      label: 'Advance Payments' },
       { to: '/accounts/bank-arrivals',    icon: Banknote,        label: 'Bank Arrivals' },
       { to: '/accounts/receipt-vouchers', icon: Receipt,         label: 'Receipt Voucher' },
@@ -80,10 +76,22 @@ export default function Sidebar({ isOpen = true }) {
   const handleLogout = () => {
     localStorage.removeItem('token')
     localStorage.removeItem('user')
+    localStorage.removeItem('permissions')
     navigate('/login')
   }
 
   if (!isOpen) return null;
+
+  // Filter out nav items the current user lacks View access to (see
+  // constants/permissions.js). A group whose items are all filtered out is dropped
+  // entirely rather than left as an empty header. Admins and users an admin has never
+  // configured permissions for see everything, unchanged from before this feature.
+  const visibleGroups = navGroups
+    .map(group => ({
+      ...group,
+      items: group.items.filter(({ to }) => hasViewAccess(ROUTE_MODULE_MAP[to.replace(/^\//, '')], user)),
+    }))
+    .filter(group => group.items.length > 0)
 
   return (
     <aside className="w-64 bg-white border-r border-slate-100 flex flex-col shadow-sm shrink-0">
@@ -102,7 +110,7 @@ export default function Sidebar({ isOpen = true }) {
 
       {/* Nav */}
       <nav className="flex-1 px-3 py-4 overflow-y-auto space-y-4">
-        {navGroups.map(group => (
+        {visibleGroups.map(group => (
           <div key={group.label}>
             <div className="flex items-center gap-2 px-3 mb-1">
               <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{group.label}</p>

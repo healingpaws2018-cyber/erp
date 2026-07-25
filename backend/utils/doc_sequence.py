@@ -171,6 +171,7 @@ def init_sequences_for_db(company_engine):
             ('JV',  'JV-', 0, 5, True,  '2627', True),  # Journal Vouchers: JV-262700001
             ('DN',  'DN-', 0, 5, True,  '2627', True),  # Debit Notes: DN-262700001
             ('CN',  'CN-', 0, 5, True,  '2627', True),  # Credit Notes: CN-262700001
+            ('CERT', 'CRT', 0, 4, True, '2627', True),  # Pet Certificates: CRT26270001
         ]
 
 

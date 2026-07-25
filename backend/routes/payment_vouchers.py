@@ -6,10 +6,11 @@ from datetime import datetime
 from decimal import Decimal
 
 from database import get_db
-from models.accounts import PaymentVoucher, PaymentVoucherDetail, GLPosting
+from models.accounts import PaymentVoucher, PaymentVoucherDetail, GLPosting, AdvancePayment
 from models.phase3 import Supplier, PurchaseBill
 from schemas.accounts import PaymentVoucherCreate, PaymentVoucherOut
 from utils.doc_sequence import get_next_doc_no, format_fy
+from utils.gl_utils import get_gl_by_code
 
 router = APIRouter(prefix="/accounts/payment-vouchers", tags=["Accounts"])
 
@@ -74,6 +75,7 @@ def create_payment_voucher(data: PaymentVoucherCreate, db: Session = Depends(get
         db.flush()
 
         # Create Details — one row per purchase bill
+        advance_funded = Decimal("0")
         for i, det in enumerate(data.details, start=1):
             pv_det = PaymentVoucherDetail(
                 payment_id=pv.payment_id,
@@ -90,8 +92,20 @@ def create_payment_voucher(data: PaymentVoucherCreate, db: Session = Depends(get
             )
             db.add(pv_det)
 
+            # If this line is adjusted against a pre-existing Advance Payment, drain
+            # that advance instead of treating it as fresh cash going out (see below).
+            if det.adv_id:
+                adv = db.query(AdvancePayment).filter(AdvancePayment.adv_id == det.adv_id).first()
+                if adv:
+                    advance_funded += det.amount_paid
+                    adv.adjusted_amount = (adv.adjusted_amount or Decimal("0")) + det.amount_paid
+                    adv.status = 'Matched' if adv.adjusted_amount >= adv.amount else 'PartiallyMatched'
+
+        fresh_cash = data.total_amount - advance_funded
+
         # Auto-post to gl_postings
-        # DR: Party account (reduces liability/creditor)
+        # DR: Party account (reduces liability/creditor) — full amount, since the
+        # bill's liability is reduced either way it's funded.
         db.add(GLPosting(
             fy_code=data.fy_code,
             posting_date=data.voucher_date,
@@ -104,23 +118,48 @@ def create_payment_voucher(data: PaymentVoucherCreate, db: Session = Depends(get
             narration=data.narration
         ))
 
-        # CR: Cash/Bank account (money goes OUT of bank)
-        db.add(GLPosting(
-            fy_code=data.fy_code,
-            posting_date=data.voucher_date,
-            gl_id=data.gl_cashbank_id,
-            voucher_type="PaymentVoucher",
-            voucher_no=data.voucher_no,
-            voucher_ref_id=pv.payment_id,
-            dr_amount=0,
-            cr_amount=data.total_amount,
-            narration=data.narration
-        ))
+        # CR: Cash/Bank account (money goes OUT of bank) — only the fresh-cash
+        # portion. The portion adjusted against a pre-existing Advance Payment
+        # already left the bank when that advance was posted, so it's drained from
+        # ADV-SUP instead (avoids double-counting the cash outflow).
+        if fresh_cash > 0:
+            db.add(GLPosting(
+                fy_code=data.fy_code,
+                posting_date=data.voucher_date,
+                gl_id=data.gl_cashbank_id,
+                voucher_type="PaymentVoucher",
+                voucher_no=data.voucher_no,
+                voucher_ref_id=pv.payment_id,
+                dr_amount=0,
+                cr_amount=fresh_cash,
+                narration=data.narration
+            ))
+
+        # CR: ADV-SUP (Advance to Suppliers) — drains the prepaid asset for the
+        # portion of this payment that was adjusted against an existing advance.
+        if advance_funded > 0:
+            adv_sup_gl = get_gl_by_code(db, "ADV-SUP")
+            if not adv_sup_gl:
+                raise HTTPException(status_code=500, detail="Chart of Accounts is missing system account 'ADV-SUP' (Advance to Suppliers).")
+            db.add(GLPosting(
+                fy_code=data.fy_code,
+                posting_date=data.voucher_date,
+                gl_id=adv_sup_gl,
+                voucher_type="PaymentVoucher",
+                voucher_no=data.voucher_no,
+                voucher_ref_id=pv.payment_id,
+                dr_amount=0,
+                cr_amount=advance_funded,
+                narration=data.narration
+            ))
 
         db.commit()
         db.refresh(pv)
         return pv
 
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Failed to create payment voucher: {e}")
@@ -210,6 +249,19 @@ def delete_payment_voucher(payment_id: int, db: Session = Depends(get_db)):
             GLPosting.voucher_type == 'PaymentVoucher',
             GLPosting.voucher_ref_id == payment_id
         ).delete()
+
+        # Reverse advance adjustments — give back what was drained from each advance
+        for det in pv.details:
+            if det.adv_id:
+                adv = db.query(AdvancePayment).filter(AdvancePayment.adv_id == det.adv_id).first()
+                if adv:
+                    adv.adjusted_amount = max(Decimal("0"), (adv.adjusted_amount or Decimal("0")) - det.amount_paid)
+                    if adv.adjusted_amount == 0:
+                        adv.status = 'Open'
+                    elif adv.adjusted_amount >= adv.amount:
+                        adv.status = 'Matched'
+                    else:
+                        adv.status = 'PartiallyMatched'
 
         db.commit()
         return {"message": "Payment Voucher cancelled successfully"}

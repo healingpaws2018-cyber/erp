@@ -5,6 +5,7 @@ from .masters import City, Species, Breed, HsnCode, GstRate
 from .people import PetOwner, Pet
 from .doctors import Doctor, Staff
 from .agents import Agent
+from .certificates import PetCertificate
 
 # Master System (Multi-Tenancy, RBAC, Company Profiles)
 from .master_sys import (

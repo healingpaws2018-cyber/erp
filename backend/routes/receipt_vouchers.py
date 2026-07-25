@@ -72,6 +72,7 @@ def create_receipt_voucher(data: ReceiptVoucherCreate, db: Session = Depends(get
         db.flush()
 
         # Create Details — one row per bill/arrival line
+        arrival_funded = Decimal("0")
         for i, det in enumerate(data.details, start=1):
             rv_det = ReceiptVoucherDetail(
                 receipt_id=rv.receipt_id,
@@ -88,42 +89,51 @@ def create_receipt_voucher(data: ReceiptVoucherCreate, db: Session = Depends(get
             )
             db.add(rv_det)
 
-            # If this line is linked to a Bank Arrival, update that arrival's entered_amount
+            # If this line is linked to a Bank Arrival, update that arrival's entered_amount.
+            # The cash/bank leg for this money was already posted when the Bank Arrival
+            # itself was recorded, so it must NOT be posted again below.
             if det.arrival_id:
                 ba = db.query(BankArrival).filter(BankArrival.arrival_id == det.arrival_id).first()
                 if ba:
+                    arrival_funded += det.amount_received
                     ba.entered_amount = (ba.entered_amount or Decimal("0")) + det.amount_received
                     if ba.entered_amount >= ba.amount:
                         ba.status = 'Matched'
                     else:
                         ba.status = 'PartiallyMatched'
 
-        # Auto-post to gl_postings
-        # DR: Cash/Bank account (money comes IN to bank)
-        db.add(GLPosting(
-            fy_code=data.fy_code,
-            posting_date=data.receipt_date,
-            gl_id=data.gl_cashbank_id,
-            voucher_type="ReceiptVoucher",
-            voucher_no=data.receipt_no,
-            voucher_ref_id=rv.receipt_id,
-            dr_amount=data.total_amount,
-            cr_amount=0,
-            narration=data.narration
-        ))
+        fresh_cash = data.total_amount - arrival_funded
 
-        # CR: Party account (reduces customer outstanding)
-        db.add(GLPosting(
-            fy_code=data.fy_code,
-            posting_date=data.receipt_date,
-            gl_id=data.gl_party_id,
-            voucher_type="ReceiptVoucher",
-            voucher_no=data.receipt_no,
-            voucher_ref_id=rv.receipt_id,
-            dr_amount=0,
-            cr_amount=data.total_amount,
-            narration=data.narration
-        ))
+        # Auto-post to gl_postings — only for the fresh-cash portion. The portion
+        # matched against a pre-existing Bank Arrival already posted DR bank / CR
+        # party when that arrival was recorded; re-posting it here would double-count
+        # both the cash inflow and the party's credit.
+        if fresh_cash > 0:
+            # DR: Cash/Bank account (money comes IN to bank)
+            db.add(GLPosting(
+                fy_code=data.fy_code,
+                posting_date=data.receipt_date,
+                gl_id=data.gl_cashbank_id,
+                voucher_type="ReceiptVoucher",
+                voucher_no=data.receipt_no,
+                voucher_ref_id=rv.receipt_id,
+                dr_amount=fresh_cash,
+                cr_amount=0,
+                narration=data.narration
+            ))
+
+            # CR: Party account (reduces customer outstanding)
+            db.add(GLPosting(
+                fy_code=data.fy_code,
+                posting_date=data.receipt_date,
+                gl_id=data.gl_party_id,
+                voucher_type="ReceiptVoucher",
+                voucher_no=data.receipt_no,
+                voucher_ref_id=rv.receipt_id,
+                dr_amount=0,
+                cr_amount=fresh_cash,
+                narration=data.narration
+            ))
 
         db.commit()
         db.refresh(rv)

@@ -268,7 +268,15 @@ export default function ConsultationForm() {
         const rxPayload = {
           consult_id: parseInt(consultId), pet_id: parseInt(form.pet_id),
           owner_id: parseInt(form.owner_id), doctor_id: parseInt(form.doctor_id),
-          notes: rxNotes, items: rxItems.filter(i => i.medicine_name)
+          notes: rxNotes,
+          items: rxItems.filter(i => i.medicine_name).map(i => ({
+            ...i,
+            // Blank Dose/Frequency/Duration leaves these as '' — the backend's
+            // Optional[int]/Optional[Decimal] fields reject '' (only accept a real
+            // number or null), so coerce blanks to null before sending.
+            duration_days: (i.duration_days === '' || i.duration_days == null) ? null : parseInt(i.duration_days),
+            quantity: (i.quantity === '' || i.quantity == null) ? null : parseFloat(i.quantity),
+          }))
         }
         if (existingRx) {
           await api.put(`/prescriptions/${existingRx.prescription_id}`, rxPayload)
@@ -279,7 +287,11 @@ export default function ConsultationForm() {
         toast.success('Prescription saved!')
       }
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Save failed')
+      const detail = err.response?.data?.detail
+      const msg = Array.isArray(detail)
+        ? detail.map(e => `${e.loc?.slice(-1)[0] ?? ''}: ${e.msg}`).join('; ')
+        : (typeof detail === 'string' ? detail : 'Save failed')
+      toast.error(msg)
     } finally { setSaving(false) }
   }
 
@@ -307,7 +319,13 @@ export default function ConsultationForm() {
     try {
       await api.put(`/consultations/${id}/close`)
       toast.success('Consultation closed!'); load()
-    } catch (err) { toast.error(err.response?.data?.detail || 'Error') }
+    } catch (err) {
+      const detail = err.response?.data?.detail
+      const msg = Array.isArray(detail)
+        ? detail.map(e => `${e.loc?.slice(-1)[0] ?? ''}: ${e.msg}`).join('; ')
+        : (typeof detail === 'string' ? detail : 'Error')
+      toast.error(msg)
+    }
   }
 
   if (loading) return (
